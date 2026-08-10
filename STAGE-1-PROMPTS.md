@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 4/10 complete. Next: prompt 5.
+**Status:** 5/10 complete. Next: prompt 6.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -284,66 +284,178 @@ touches a socket.
 **Item:** Event bus, request handler, and debug CLI.
 **Branch:** `prompt-05-event-bus-debug-cli`
 
-Wire the core together and give it its first driver: the event bus (broadcast to every
-attached client), request dispatch with correlation ids, the client/core trait plus
-in-process mpsc impl in `havoc-transport`, and a debug CLI in the `supernaut` binary that
-drives the core over the typed boundary — connect, join, send, tail events. Live
-connect is plain TCP to a **local ergo only**, behind a loud explicit flag (§2.3's
-opt-in); this is the prompt that creates `scripts/live-run.sh`, and the project's first
-live run.
+```
+Wire the core together and give it its first driver: after this prompt a person
+boots a local ergo and drives havoc-core over the typed havoc-ipc boundary from a
+debug CLI, watching a connection register and a channel join arrive as events.
+
+Three consequences the item does not authorize on its own. They are decided here
+and called out first because two of them touch shipped surfaces:
+
+- The client/core trait cannot live where both sides code against it. There is no
+  Cargo edge between havoc-core and havoc-transport in either direction, so core
+  cannot implement havoc_transport::ClientTransport. Decision: core exposes plain
+  tokio channels; the adapter that dresses them as the trait lives in the binary,
+  crates/supernaut/src/wiring.rs. Do not add the edge — the boundary-check
+  amendment plus its fixtures is a larger change than the adapter, and the adapter
+  is exactly what stage 4's UDS impl will do internally anyway. Note there are now
+  two things called a transport and only one is in havoc-transport: the IRC
+  line-transport trait lives in havoc-core (see below), which is also what
+  check-docs.sh's boundary rule already implies by forbidding irc-proto in
+  havoc-transport.
+- Event::SearchResults is request-correlated inside a type whose doc says
+  "broadcast to every attached client" (crates/havoc-ipc/src/lib.rs). Decision:
+  the bus gets two lanes — a broadcast lane and a per-session directed lane — and
+  correlated events go out directed only. Amend the Event doc comment in this
+  prompt so the type stops asserting something false. This is a doc change, not a
+  shape change; stage 4 would otherwise inherit an information-leak-shaped
+  accident.
+- Event::ConnectionState gains detail: Option<String>, with #[serde(default)].
+  Machine::phase() folds State::Failed's reason away, and a debug CLI that cannot
+  say why a connection died fails its own live run; routing that reason out of
+  band would be a shortcut embedded mode can take and attached mode cannot
+  (§4.3). Adding a field to a struct-like variant is precisely the evolution
+  unknown_struct_fields_are_tolerated in crates/havoc-ipc/tests/roundtrip.rs
+  proves, so PROTOCOL_VERSION stays 1 — bumping it would claim a break that test
+  says is not one. Extend the roundtrip test with the populated field. Do not
+  widen ConnectionPhase: its three variants remain the coarse projection.
+
+The work:
+
+- The bus, crates/havoc-core/src/bus.rs: Bus, ClientId, an explicit
+  EVENT_CHANNEL_CAPACITY constant, Bus::broadcast(Event) over tokio broadcast and
+  Bus::direct(ClientId, Event) over that session's mpsc. broadcast() carries a
+  debug_assert rejecting correlated variants so the lane choice is structural
+  rather than remembered, and a test asserts a second session never observes the
+  first's SearchResults. A lagged broadcast receiver is surfaced to the client as
+  a loud error, never a silent drop — a client whose projection quietly missed
+  events is the §4.5 bug class that is undebuggable later.
+- Request dispatch, crates/havoc-core/src/core.rs: Core::spawn(storage, ...) ->
+  CoreHandle, and CoreHandle::attach() -> Session { id, requests, responses,
+  events }. Sessions send on a shared mpsc::Sender<(ClientId, Request)>; the
+  ClientId tag is what makes routing and per-session correlation possible, and it
+  is the same thing stage 4's accept loop will do. RequestId is client-chosen and
+  therefore unique only within a session — never key a core-global map on it.
+  Every request produces exactly one Response, including ResponseBody::Error for
+  an unknown network or buffer: a debug CLI that hangs teaches nothing.
+- The IRC line transport, crates/havoc-core/src/connection/io.rs: the trait prompt
+  4 deferred — connect, send_line, next_line, close — plus a tokio TCP impl doing
+  CRLF framing. It lives in havoc-core, per the prompt-1 boundary above. The
+  scripted-fake role stays with the transcript tables; do not build a second fake.
+- The actor, crates/havoc-core/src/connection/actor.rs: one tokio task per
+  network owning its Machine by value and its transport, selecting over inbound
+  lines and inbound commands. Machine::handle_line keeps its Vec<String>
+  signature — the nine-transcript corpus in crates/havoc-core/tests/state_machine.rs
+  asserts on exactly that, and widening it to carry state changes churns the whole
+  corpus to buy what a diff buys for free. The actor snapshots phase() before each
+  line, compares after, and emits ConnectionState on change, reading state() for
+  the Failed reason to fill detail. Keep that diff helper keyed on state(), not
+  phase(): prompt 6's backoff must distinguish Failed from Disconnected and
+  phase() folds them.
+- Networks (crates/havoc-core/src/connection/mod.rs) is re-typed to hold actor
+  handles (command sender + JoinHandle) rather than Machines, since the actor task
+  now owns its Machine outright and no state is shared (§5.5). Update the map test
+  at the bottom of state_machine.rs into an actor-level test rather than keeping a
+  second map — one map from commit one is the whole §6.9 point.
+- A raw-line trace sink on the actor, off by default, enabled by --trace-irc,
+  writing `>> line` / `<< line` to stderr. This is diagnostics, not wire state,
+  and it is deliberately the capture mechanism prompt 6 harvests live transcripts
+  from — shape the format so a capture is mechanically convertible to Step rows.
+  Do not reach for tracing or log: two eprintln! calls behind a flag is the whole
+  need, and a logging framework arrives when something wants structured filtering.
+- havoc-transport, crates/havoc-transport/src/lib.rs: ClientTransport with async
+  fn send(Request) and recv() -> Option<Incoming>, where Incoming multiplexes
+  Response and Event; TransportError; and an InProcess impl over tokio channels
+  carrying typed values with no serialization anywhere. One impl exists, so the
+  trait is not made dyn-compatible; if stage 4 wants runtime selection it wraps
+  both impls in an enum rather than boxing. Incoming is transport-local — whether
+  a framed union needs a wire type in havoc-ipc is stage 4's call, not this one.
+- The CLI, crates/supernaut/src/main.rs plus a session module. One subcommand,
+  `session`, taking --host --port --nick --join and the mandatory
+  --allow-plaintext; it boots core plus the in-process transport and reads
+  newline commands from stdin: connect, join <channel>, send <channel> <text>,
+  wait registered [secs], wait buffer <name> [secs], quit. Every event received
+  prints one greppable line to stdout (`event connection-state network=1
+  phase=registered`), every response prints `ok <id>` or `error <id> <message>`.
+  The command flow is built on the event stream, not on the reply:
+  ResponseBody::Ack means accepted and nothing more, so `join` returns when
+  BufferCreated arrives and `send` resolves a channel name through a session-local
+  name→BufferId map built from BufferCreated events — which is exactly the
+  projection the TUI will keep. `wait` exists so live-run.sh never sleeps; a
+  timeout exits non-zero with the deadline named, and every later prompt inherits
+  the determinism.
+- Plaintext is a loud explicit opt-in (§2.3): without --allow-plaintext the
+  session refuses to start, and even with it the host must resolve to loopback.
+  TLS is prompt 6; keeping this prompt's failures on-box keeps them about wiring
+  rather than certificates.
+- No subcommand keeps prompt 3's behavior byte for byte: `supernaut --data-dir
+  <path>` still prints name/version and the history line and exits 0. That is
+  prompt 3's documented acceptance and it survives the rewrite.
+- Dependencies, both with BUILD-LOG decision entries. tokio (already on
+  DEP_ALLOWLIST) arrives in havoc-core (sync, net, time, rt, io-util),
+  havoc-transport (sync), and supernaut (rt-multi-thread, macros) — explicit
+  feature lists, never "full". clap with derive is added to supernaut only and to
+  DEP_ALLOWLIST: prompt 3's "one flag, no dependency justified" rationale expires
+  the moment subcommands exist, and prompts 8, 9 and 10 each add verbs to this
+  same grammar. Do not add tokio-util — LengthDelimitedCodec is stage 4's framing.
+  An allowlist edit is not a check change, so no scripts/test-checks.sh fixtures
+  are owed here.
+- scripts/live-run.sh, born here and reused by every later prompt: set -euo
+  pipefail, shellcheck-clean. It uses $ERGO_BIN when set, otherwise downloads a
+  version-pinned ergo release into a gitignored .cache/ergo/ and verifies a
+  recorded sha256; generates an ergo config in mktemp -d on a random free port;
+  runs two supernaut sessions against it, the second as the other party; asserts
+  on the greppable output; and tears everything down on trap. ergo is a test
+  harness acquired by this script — never a Cargo dependency, never on
+  DEP_ALLOWLIST. Add the cache dir to .gitignore.
+- No message rows are written and no MessageAdded event is emitted. Connect
+  resolves its NetworkId through Storage::ensure_network and join emits
+  BufferCreated from Storage::ensure_buffer, both wrapped in
+  tokio::task::spawn_blocking at the two call sites, because the Storage handle in
+  crates/havoc-core/src/storage/mod.rs blocks on recv() and an actor task calling
+  it inline stalls the executor. Two call sites is not three: do not build an
+  async facade over the job channel, which is prompt 7's decision to make with the
+  flood test in front of it.
+
+Acceptance: on a machine with no ergo installed, run scripts/live-run.sh — it
+fetches the pinned binary, writes a config into a temp dir, boots ergo on a random
+free port, and drives two sessions against it while you watch the first print
+`event connection-state ... phase=connecting`, then `phase=registered`, then
+`event buffer-created ... #supernaut`, and the second's send land; the script exits
+0 and leaves no ergo process and no temp dir behind. Run it once more with
+--trace-irc and read the `>> CAP LS 302` / `<< :ergo CAP * LS ...` exchange, which
+is the capture prompt 6 harvests. Kill ergo mid-session and the CLI prints
+phase=disconnected once and stops rather than spinning. Separately, `supernaut
+--data-dir <tmp>` with no subcommand still prints the name/version and history
+lines and exits 0; cargo test --workspace and make check are green.
+
+Do not: TLS, rustls, or DNS against a real network (prompt 6 — I/O bugs and
+certificate bugs are different classes and this prompt's failures should all be
+wiring); SASL against a live server (prompt 6 — the SASL states are already
+transcript-tested and a live failure here would be indistinguishable from a wiring
+bug); reconnect timing or backoff (prompt 6 — on disconnect the actor emits
+Disconnected and stops, which is the seam, not the policy); persisting anything
+seen, seq assignment, or MessageAdded (prompt 7 — the write path deserves its own
+session with a flood test); FTS or a search verb (prompt 8), backlog or mark-read
+verbs (prompt 9 — the stdin grammar grows there, one prompt per verb set); a
+config file (prompt 10 — connection parameters are flags here, and a config
+surface designed before its features calcifies); CBOR framing or any serialization
+on the transport (stage 4 — in-process is typed values); and no Cargo edge between
+havoc-core and havoc-transport in either direction.
+```
 
 **Examined for a split and left whole**, because bus, dispatch, transport trait, and
 CLI are one wiring seam — none is testable in anger without the others. Revisit if the
 plain-TCP connector balloons; it can move wholesale into prompt 6.
 
-Do not: TLS, DNS to real networks, SASL against a live server (prompt 6), persistence
-of anything seen (prompt 7), or CBOR framing on the transport (stage 4 — in-process is
-typed messages, no serialization).
-
-*To be written out before it starts.*
-
-### Carry-forward
-
-- From prompt 1: **no Cargo edge exists between havoc-core and havoc-transport, in
-  either direction.** Both depend only on havoc-ipc (see their `Cargo.toml`s); only
-  the `supernaut` binary depends on both. Either shape the wiring so core exposes
-  plain channels and `supernaut` adapts them to havoc-transport's trait, or add the
-  edge deliberately — with the `scripts/check-docs.sh` boundary-check amendment and
-  its fixtures in the same change — not as a mid-session surprise.
-- From prompt 2: **`Event` is contractually broadcast, but `SearchResults` is
-  request-correlated.** `Event::SearchResults { request, .. }` in
-  `crates/havoc-ipc/src/lib.rs` sits inside a type documented "broadcast to every
-  attached client" — as shipped, every client would receive every other client's
-  search hits. Decide the bus semantics deliberately (broadcast-and-filter vs
-  routed correlated events) and record it, or stage 4's multi-client attach
-  inherits an information-leak-shaped accident.
-- From prompt 2: **`Ack` is fire-and-forget; the debug CLI cannot await outcomes
-  via Response.** `ResponseBody::Ack`'s contract is "accepted; resulting state
-  lands as Events" — connect/join/send success is only observable by tailing
-  correlated events. Design the CLI's command flow around the event stream, not
-  the reply.
-- From prompt 4: **the line-transport trait was never built — the machine is a
-  sync pure function and there is no actor yet.** `Machine::handle_line(&str) ->
-  Vec<String>` in `crates/havoc-core/src/connection/mod.rs` is the entire seam
-  (deliberate sans-I/O deviation, recorded in the log). This prompt creates the
-  actor loop and the transport seam wholesale — and inherits the prompt-1
-  constraint the deleted note carried: no Cargo edge between havoc-core and
-  havoc-transport in either direction; any line-transport trait lives in
-  havoc-core or havoc-ipc.
-- From prompt 4: **`handle_line` returns outbound lines only — state changes
-  and received messages are silent.** Emitting `ConnectionState` events means
-  diffing `Machine::phase()` after every line or widening the return type, and
-  the nine-transcript corpus in `crates/havoc-core/tests/state_machine.rs`
-  asserts on exactly `Vec<String>` — widening churns it all. Also `phase()`
-  folds `State::Failed`'s reason away; a CLI that must print why a connection
-  died needs that surfaced. Decide the shape in the prompt text.
-- From prompt 3: **supernaut's `main` is open-print-exit behind a closed arg
-  grammar.** `data_dir_from_args` in `crates/supernaut/src/main.rs` rejects
-  everything except `--data-dir`, which is prompt 3's documented acceptance
-  behavior and must survive the CLI rewrite. Its "one flag, no dependency
-  justified" rationale expires the moment subcommands exist — schedule the
-  arg-parsing dependency decision (entry + allowlist) in the prompt text, not
-  mid-session.
+**Status:** complete. Shipped per the JIT detail with recorded deviations: `Directed`
+carries responses too (the ordered `direct(ClientId, Event)` signature could not carry
+them), `recv()` returns `Result` not `Option` (the order was internally inconsistent
+with its own loud-lag demand), `join` is fire-and-forget with `wait buffer` as the
+completion verb, and the live-run script polls twice where no event exists yet to wait
+on (prompt 7 deletes the polls). The review's eleven carry-forward proposals were all
+adopted (prompts 6/7/8/10, PLAN stages 2/4). Live run: passed, all six assertions,
+first try.
 
 ---
 
@@ -365,6 +477,23 @@ session.
 
 ### Carry-forward
 
+- From prompt 5: **the Failed/Disconnected distinction never leaves the actor
+  task — backoff must be written inside `run()`.** `ActorReport::Phase` in
+  `crates/havoc-core/src/connection/actor.rs` exports only the coarse phase plus
+  a detail string; `Machine::state()` is readable only inside `run()`, and
+  `State::Failed` triggers a bare return. The retry loop must wrap the
+  connect/register head of `run()` (fresh `Machine::start` per attempt), not
+  consume reports downstream — downstream, a refused connect and a fatal SASL
+  failure are both just Disconnected-with-detail.
+- From prompt 5: **the transcript capture is stderr-multiplexed, not a clean
+  stream.** The `>> `/`<< ` lines share stderr with session diagnostics, and
+  live-run.sh redirects all of session A's stderr into `a.trace`. The
+  capture-to-Step-rows converter must filter on the two prefixes, and `>> `
+  covers both machine replies and user-command lines.
+- From prompt 5: **live-run.sh only works on one machine.**
+  `ERGO_PLATFORM=macos-arm64` with a single pinned sha; any other host downloads
+  the wrong tarball and fails the sha check. Budget platform detection or scope
+  this prompt's live run to the dogfood Mac explicitly.
 - From prompt 4: **the transcript corpus is inline Rust, not the fixture files
   PLAN promised.** The corpus is `Step(&str, &[&str])` tables in
   `crates/havoc-core/tests/state_machine.rs`. "Capture live transcripts into this
@@ -429,6 +558,26 @@ scenarios beyond what ergo can produce today (stage 5 tests against a real bounc
   bridge (async facade over the job channel, or `spawn_blocking`) in the prompt
   text, not when the flood test hangs. Also: the flood harness owns `PRAGMA
   synchronous` tuning — `Storage::open` deliberately leaves it at the default.
+- From prompt 5: **the parse-twice outcome already shipped — `our_join` is the
+  first thing the parse-once decision must consume.** `our_join` in
+  `crates/havoc-core/src/connection/actor.rs` re-parses every inbound line to
+  spot the confirmed self-JOIN. Whichever seam this prompt picks, it must delete
+  or subsume `our_join` and the `ActorReport::JoinedChannel` path — otherwise
+  ingestion adds a third parse.
+- From prompt 5: **`handle_report` awaits storage inline in the core select
+  loop — the flood will serialize through it.** `run()` in
+  `crates/havoc-core/src/core.rs` processes one report at a time and awaits a
+  `spawn_blocking` round-trip per event. Batching must decouple report intake
+  from storage completion, not merely batch inside the storage thread.
+- From prompt 5: **two id spaces share one type, and in every live run both
+  equal 1.** `network_rows` in `crates/havoc-core/src/core.rs` maps caller
+  wire ids to storage row ids — same `NetworkId` type both sides — while wire
+  `BufferId`s ARE storage rows. Ingest writes must go through the mapping;
+  consider a core-private row-id newtype before the write path lands.
+- From prompt 5: **the sleep polls in live-run.sh are waiting for your event.**
+  Two `sleep 0.2` loops exist because there is no MessageAdded to `wait` on.
+  Grow a `wait message` verb and delete both polls, or the never-sleeps
+  determinism claim stays false in the script every later prompt copies.
 - From prompt 4: **the machine parses and then discards every non-protocol
   message — ingestion cannot tap it.** `handle_message` in
   `crates/havoc-core/src/connection/mod.rs` drops PRIVMSG/NOTICE/JOIN, and the
@@ -474,6 +623,11 @@ ranking work beyond FTS5 defaults.
   (core parses `from:`/`in:`) and no search variant on `ResponseBody`. Structured
   filter fields or a synchronous results response are wire changes — design the
   filter grammar as core-side parsing of a plain string with no wire cooperation.
+- From prompt 5: **request dispatch discards the `ClientId` before the handler
+  runs.** `handle_request` in `crates/havoc-core/src/core.rs` receives neither
+  the client id nor the bus; SearchResults must go out `Bus::direct(client, ..)`
+  and `Bus::broadcast`'s debug_assert fires if routed the easy way. Plan the
+  signature change into the prompt text.
 - From prompt 3: **`message` is WITHOUT ROWID — FTS5 external-content's rowid
   contract cannot hold.** External-content FTS5 (`content='message'`) syncs by
   `content_rowid`, and `message` in `crates/havoc-core/migrations/0001_init.sql`
@@ -533,6 +687,15 @@ via `keyring` where available with an encrypted-file fallback; never plaintext s
 in the config file, including for SASL (§5.8). The debug CLI runs from config alone,
 and the prompt ends with the stage-1 acceptance run: connect, join, log, kill,
 restart, search.
+
+### Carry-forward
+
+- From prompt 5: **the debug session hardcodes network identity that config must
+  replace.** `const NETWORK: NetworkId = NetworkId(1)` in
+  `crates/supernaut/src/session.rs`, and the storage network name is
+  `debug-<host>` — `ensure_network` keys on name, so a reused data dir accretes
+  one row per host string. Config becomes the authority for caller ids and
+  stable names; decide whether `debug-*` rows are migrated or abandoned.
 
 **Examined for a split (config vs credentials) and left whole**, because config
 parsing without the credential story ships exactly the plaintext-password trap the

@@ -1,6 +1,6 @@
 # Supernaut
 
-![stage 1 progress](https://img.shields.io/badge/stage%201-4%2F10-blue)
+![stage 1 progress](https://img.shields.io/badge/stage%201-5%2F10-blue)
 
 A terminal IRC client for people who want the client to already be good, not to
 become good after three weekends of configuration.
@@ -65,7 +65,7 @@ answer search and backlog requests — driven by a debug CLI, no UI yet.
 | 2 | IPC wire types | ✅ done |
 | 3 | Storage schema and migrations | ✅ done |
 | 4 | Connection state machine, offline | ✅ done |
-| 5 | Event bus, request handler, and debug CLI | ⬜ todo |
+| 5 | Event bus, request handler, and debug CLI | ✅ done |
 | 6 | Live connection, TLS, and reconnect | ⬜ todo |
 | 7 | Message ingestion, identity, and batched writes | ⬜ todo |
 | 8 | Full-text search | ⬜ todo |

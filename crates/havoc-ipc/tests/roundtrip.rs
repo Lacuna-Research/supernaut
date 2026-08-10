@@ -92,6 +92,12 @@ fn events_roundtrip() {
         Event::ConnectionState {
             network: NetworkId(1),
             phase: ConnectionPhase::Registered,
+            detail: None,
+        },
+        Event::ConnectionState {
+            network: NetworkId(1),
+            phase: ConnectionPhase::Disconnected,
+            detail: Some("SASL authentication failed".to_owned()),
         },
         Event::BufferCreated {
             buffer: BufferInfo {

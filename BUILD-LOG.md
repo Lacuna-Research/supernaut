@@ -628,3 +628,108 @@ prompt-10 credentials-Debug note — fixed in this PR instead, moot.
 the transcript test corpus, which the prompt names as "the deliverable as much as
 the code", and the split candidate (tests from machine) would sever the corpus
 from the rules it pins. The mechanical bulk is tables, reviewed line by line.
+
+## Decision — tokio lands, with explicit feature lists per crate
+**Date:** 2026-08-10  **Affects:** havoc-core, havoc-transport, supernaut Cargo.tomls
+
+**Chose:** tokio (NORTH-STAR §5.5's settled runtime, on the allowlist since
+bootstrap) as a direct dependency where prompt 5 needs it: havoc-core
+(sync,net,time,rt,io-util,macros — actors, channels, TCP), havoc-transport (sync —
+channels only), supernaut (rt-multi-thread,macros,io-std,io-util,time,sync — the
+runtime and stdin). Feature lists are explicit, never "full".
+**Over:** `features = ["full"]` (pulls the process/signal/fs kitchen sink into
+every build), or deferring the runtime again (prompt 5 is the actor prompt; there
+is nothing left to defer to).
+**Because:** §5.5 already argued tokio vs alternatives; this entry records the
+arrival and the feature discipline. It was already in the tree transitively via
+irc-proto since prompt 4 — now it is deliberate.
+
+## Decision — clap for the CLI grammar
+**Date:** 2026-08-10  **Affects:** crates/supernaut/Cargo.toml, scripts/check-docs.sh (allowlist)
+
+**Chose:** `clap` (derive) in supernaut only, added to DEP_ALLOWLIST.
+**Over:** extending prompt 3's hand-rolled parser.
+**Because:** that parser's own recorded rationale — "the surface is one flag" —
+expired the moment `session` landed with seven flags, and prompts 8/9/10 each add
+verbs to this same grammar. The binary is the one crate where a CLI dependency
+belongs; nothing else may grow one.
+**Revisit if:** the grammar is still ~one subcommand at prompt 10 — then note in
+that entry that this was premature.
+
+## Prompt 5 — Event bus, request handler, and debug CLI
+
+**Commit:** PR #8 (squash)  **Date:** 2026-08-10
+
+**Shipped:** the wired core — two-lane bus (broadcast + per-session directed, with
+the structural debug_assert and leak test), request dispatch with per-session
+correlation, the IRC line-transport trait + TCP impl in havoc-core, the actor task
+owning Machine and transport, `Networks` re-typed to actor handles, havoc-transport's
+`ClientTransport` + `InProcess`, the binary's wiring adapter, the `session` debug CLI
+with event-driven verbs and deterministic `wait`s, `--trace-irc` capture, and
+`scripts/live-run.sh` with a pinned, sha-verified ergo. `ConnectionState` gained
+`detail` (the one authorized wire change; roundtrip-tested both ways).
+
+**Deviations:** `Bus::direct` carries `Directed` (responses + correlated events) not
+the ordered bare `Event` — responses need the same lane; `recv()` returns
+`Result<Incoming, TransportError>` not `Option` — the order's signature could not
+carry the loud-lag it demanded elsewhere; `join` is fire-and-forget with
+`wait buffer` as the completion verb (the module doc initially claimed otherwise —
+review caught it, doc fixed); `LineTransport` has no `close` (drop is teardown);
+`is_loopback` is a strict string check, refusing more than the ordered "resolves to
+loopback", never less; tokio feature lists exceed the order where the code needs it
+(`macros` powers `select!`, not just tests — reviewer's dev-dep suggestion rejected
+on that ground); the session gained `--data-dir` (storage must open somewhere);
+caller-assigned wire NetworkIds with a core-private row-id mapping (documented in
+core.rs — the alternative leaks storage identity onto the wire); live-run.sh polls
+twice with sleep where no event exists yet to wait on (prompt 7's note deletes them)
+and keeps its guarded `rm -rf` on a mktemp dir as the one sanctioned use.
+
+**Deferred:** None.
+
+**Learned:** ergo has no Homebrew formula — the pinned-download path in live-run.sh
+is the real path, verified against the release checksums; a minimal ergo yaml needs
+accounts/limits/history sections present even when unused. `Storage` grew a
+clonable `StorageClient` for `spawn_blocking`; the review's "replace, don't
+deprecate" catch removed the mirrored delegators — `client()` is the one route.
+
+**Measured:** live run end-to-end (fetch ergo, boot, two sessions, six assertions):
+~8s warm. 2323-line diff pre-review (mostly Cargo.lock + the JIT detail itself).
+
+**Live run:** passed, first try, all six assertions: A saw
+connecting→registered→buffer-created, the trace captured `>> CAP LS 302`, B's
+PRIVMSG landed in A's capture, B registered. Re-ran after review fixes: passed.
+`supernaut --data-dir <tmp>` with no subcommand still prints name/version + history
+and exits 0 (clap now also answers --help/--version — grammar superset, invocation
+behavior preserved).
+
+**Review:** adopted — the false `join` doc claim (fixed), the duplicated Storage
+delegators (removed; callers go through `client()`), the free-port check and
+guarded cleanup in live-run.sh, and all eleven carry-forward proposals. Rejected:
+`close` on the trait (drop-based teardown; add it when something needs early
+close), dev-depping tokio `macros` (select! is runtime code), trimming the ergo
+config's history/auth sections (stage 5 and prompt 6 use them; regenerating the
+yaml per prompt is churn), and DNS-resolving loopback enforcement (strict strings
+refuse a superset).
+
+**Carry-forward consumed:** all six notes — no-edge constraint (adapter in the
+binary; no core↔transport edge shipped), SearchResults leak (two-lane bus +
+debug_assert + test), Ack semantics (event-driven CLI verbs), no-actor/no-trait
+(built wholesale: io.rs trait in havoc-core, actor.rs task), handle_line shape
+(not widened; actor diffs state() and fills detail from Failed), arg-parsing
+decision (clap, with entry + allowlist).
+
+**Carry-forward raised:** eleven, all from the review harvest, all adopted:
+prompt 6 (backoff must live inside run() — the distinction never leaves the actor;
+trace capture is stderr-multiplexed — specify the filter; live-run.sh is
+one-machine), prompt 7 (our_join is the parse-twice outcome to subsume;
+handle_report serializes storage through the select loop; two id spaces share one
+type; the sleep polls await your event — grow `wait message`), prompt 8 (dispatch
+discards ClientId before the handler — plan the signature), prompt 10 (hardcoded
+NetworkId(1) and debug-<host> naming), stage 2 item 1 (duplicated, cross-lane
+unordered event stream), stage 4 item 1 (the merge and Lagged have no wire story).
+Rejected from the harvest: none.
+**Oversize:** 1328 changed lines in crates/ against the 800 cap. The wiring seam is
+one prompt by design ("Examined for a split and left whole" — bus, dispatch,
+transport trait, actor, and CLI are not testable in anger apart), and 400 of the
+lines are the ordered JIT prompt detail plus tests. Splitting would have produced
+two PRs that cannot each pass their own live run.

@@ -192,6 +192,14 @@ Covers NORTH-STAR §8 M3.
    the in-process transport; render loop rebuilds each tick from a local projection of
    core events (§4.10); input becomes typed requests. No shortcut embedded mode can
    take that attached mode could not (§4.3).
+
+   ### Carry-forward
+   - From stage 1 prompt 5: **the event stream is duplicated and cross-lane
+     unordered.** The actor emits ConnectionState on every internal state change
+     (repeated `phase=connecting`), and `wiring.rs` merges directed and broadcast
+     lanes via select! with no ordering between an Ack and the event it caused.
+     The TUI's projection must dedupe phase transitions and never assume
+     response-before-event.
 2. **Wrapped-line cache.** The largest single piece of original UI work (§4.10): keyed
    on (buffer, width), invalidated on resize, pre-rendered `Line` window around the
    viewport. Its own module, property-tested over random resize sequences (§6.7).
@@ -245,6 +253,15 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
 1. **UDS transport and CBOR framing.** `LengthDelimitedCodec` + `ciborium` over a Unix
    socket at `$XDG_RUNTIME_DIR/supernaut/core.sock`, filesystem permissions as the auth
    model (§4.8); requests and events multiplexed on one connection.
+
+   ### Carry-forward
+   - From stage 1 prompt 5: **the two-lane merge and the Lagged signal are
+     binary-local and have no wire story.** The merge of
+     `Session { directed, broadcast }` and the `Lagged(n)` conversion live in
+     `crates/supernaut/src/wiring.rs`; `Incoming`/`TransportError` are
+     transport-local by design. The UDS server must perform the same merge
+     core-side and give lag/close a frame representation — otherwise the
+     loud-lag guarantee silently fails to cross the socket.
 2. **Capability handshake.** Feature lists exchanged, intersection operated on; no
    version lockstep (§4.8). The constants live in `havoc-ipc`.
 

@@ -56,12 +56,12 @@ fn migrations_create_then_noop() {
         }
     );
     assert_eq!(report.applied(), 1);
-    assert_eq!(storage.schema_version().expect("version"), 1);
+    assert_eq!(storage.client().schema_version().expect("version"), 1);
     drop(storage);
 
     let (storage, report) = Storage::open(&path).expect("second open");
     assert_eq!(report.applied(), 0, "reopening must be a no-op");
-    assert_eq!(storage.schema_version().expect("version"), 1);
+    assert_eq!(storage.client().schema_version().expect("version"), 1);
 }
 
 /// Drift from the §4.9 shape must be loud: assert the exact schema.
@@ -135,15 +135,16 @@ fn ensure_calls_are_idempotent_through_the_channel() {
     let (_dir, path) = temp_db();
     let (storage, _) = Storage::open(&path).expect("open");
 
-    let network = storage.ensure_network("libera").expect("network");
-    let network_again = storage.ensure_network("libera").expect("idempotent");
+    let client = storage.client();
+    let network = client.ensure_network("libera").expect("network");
+    let network_again = client.ensure_network("libera").expect("idempotent");
     assert_eq!(network, network_again);
 
-    let buffer = storage
+    let buffer = client
         .ensure_buffer(network, "#supernaut", BufferKind::Channel)
         .expect("buffer");
     assert_eq!(
-        storage
+        client
             .ensure_buffer(network, "#supernaut", BufferKind::Channel)
             .expect("idempotent"),
         buffer

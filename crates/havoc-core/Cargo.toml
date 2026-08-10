@@ -11,3 +11,4 @@ workspace = true
 havoc-ipc.workspace = true
 irc-proto = "1.1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+tokio = { version = "1.53.1", features = ["sync", "net", "time", "rt", "io-util", "macros"] }

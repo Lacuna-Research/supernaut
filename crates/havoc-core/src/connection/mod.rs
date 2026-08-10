@@ -6,7 +6,9 @@
 //! `irc-proto` is used for `Message` parse/serialize only; every decision about
 //! *when* to say what lives here.
 
+pub mod actor;
 mod caps;
+pub mod io;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
@@ -247,22 +249,23 @@ impl Machine {
 }
 
 /// The actor map, from commit one (NORTH-STAR §6.9): multi-network is a
-/// `HashMap` entry, never a retrofit.
+/// `HashMap` entry, never a retrofit. Holds actor handles — each task owns
+/// its `Machine` outright; no state is shared (§5.5).
 #[derive(Debug, Default)]
 pub struct Networks {
-    machines: HashMap<NetworkId, Machine>,
+    actors: HashMap<NetworkId, actor::ActorHandle>,
 }
 
 impl Networks {
-    pub fn insert(&mut self, id: NetworkId, machine: Machine) {
-        self.machines.insert(id, machine);
+    pub fn insert(&mut self, id: NetworkId, handle: actor::ActorHandle) {
+        self.actors.insert(id, handle);
     }
 
-    pub fn get_mut(&mut self, id: NetworkId) -> Option<&mut Machine> {
-        self.machines.get_mut(&id)
+    pub fn get(&self, id: NetworkId) -> Option<&actor::ActorHandle> {
+        self.actors.get(&id)
     }
 
-    pub fn iter(&self) -> impl Iterator<Item = (&NetworkId, &Machine)> {
-        self.machines.iter()
+    pub fn iter(&self) -> impl Iterator<Item = (&NetworkId, &actor::ActorHandle)> {
+        self.actors.iter()
     }
 }

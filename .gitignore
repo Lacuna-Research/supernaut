@@ -8,3 +8,6 @@ discipline-stats.txt
 
 # Rust build artifacts.
 /target/
+
+# Test-harness binaries (ergo) fetched by scripts/live-run.sh.
+.cache/

@@ -191,12 +191,21 @@ pub enum ConnectionPhase {
     Disconnected,
 }
 
-/// Unsolicited core-to-client events, broadcast to every attached client.
+/// Unsolicited core-to-client events. Most variants are broadcast to every
+/// attached client; **request-correlated variants (`SearchResults`) travel a
+/// per-session directed lane only** — broadcasting another client's search
+/// hits would be an information leak (prompt-5 decision).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Event {
     ConnectionState {
         network: NetworkId,
         phase: ConnectionPhase,
+        /// Human-readable cause when the phase change has one (e.g. the
+        /// fail-closed SASL reason behind a `Disconnected`). Added post-v1 of
+        /// this type: `#[serde(default)]` keeps old encodings decodable, per
+        /// the unknown-field tolerance the roundtrip tests prove.
+        #[serde(default)]
+        detail: Option<String>,
     },
     BufferCreated {
         buffer: BufferInfo,
