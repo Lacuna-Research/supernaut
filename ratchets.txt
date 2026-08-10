@@ -1,0 +1,6 @@
+# Ceilings for slow-rot metrics. scripts/measure-ratchets.sh emits current values;
+# make check fails if any value exceeds its ceiling here. When a value improves,
+# tighten the ceiling in the same PR — the ratchet only turns one way. Raising a
+# ceiling requires a decision entry in BUILD-LOG.md.
+todo-count 0
+longest-file 400

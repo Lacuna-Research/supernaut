@@ -1,0 +1,79 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # The documentation discipline is a required status check, not an advisory one.
+  # Run it as its own job so a red badge says which kind of thing broke.
+  discipline:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history: the script diffs against the base ref and reads other
+          # branches (e.g. a published docs branch) for cross-checks.
+          fetch-depth: 0
+      - name: Documentation discipline
+        run: ./scripts/check-docs.sh "origin/${{ github.base_ref || 'main' }}"
+
+  # The enforcement script's own tests. Gated on the script (and its fixtures)
+  # changing would be cheaper, but a broken check fails open — so this runs always,
+  # and stays a required status check.
+  discipline-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test the checks
+        run: ./scripts/test-checks.sh
+
+  # Secret scanning runs explicitly rather than relying on the platform's, which is
+  # not available on every plan. Delete only if you have confirmed the alternative.
+  #
+  # The gitleaks binary is run directly rather than via gitleaks-action: the action
+  # wrapper demands a paid license key on organization-owned repos; the scanner
+  # itself is MIT and does the same job.
+  secrets:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Scan git history for secrets
+        run: >
+          docker run --rm -v "$PWD:/repo"
+          ghcr.io/gitleaks/gitleaks:v8.30.1
+          git /repo --no-banner --redact
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # The Makefile ships with placeholder bodies, so a template checkout has nothing
+      # to build; skip loudly rather than fail red on every commit. The guard keys on
+      # the placeholder text and disappears the moment the Makefile is adapted — a
+      # real project cannot skip its own build. The skip is printed, never silent.
+      - name: Build, test, lint
+        run: |
+          if grep -q 'TODO: build' Makefile; then
+            echo "skipped: Makefile not yet adapted (step 6 of METHOD.md's adaptation checklist)"
+            exit 0
+          fi
+          make build test lint
+
+  # A job that enforces an architectural boundary mechanically rather than by review.
+  # The pattern to copy: pick a rule that a *different environment* makes impossible to
+  # break silently — a pure module built on a platform that lacks the APIs it must not
+  # use, a library built with the app target excluded, a package installed from a clean
+  # container. Delete this job only if the project genuinely has no such rule.
+  #
+  # purity:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: <build only the pure module, in an environment lacking the forbidden APIs>

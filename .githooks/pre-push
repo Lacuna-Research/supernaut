@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Installed by: make hooks
+#
+# Refuses to push a branch still carrying the name a worktree helper generated for it.
+# Matching the exact generated name rather than a bare `worktree-*` prefix: a branch
+# genuinely *about* worktrees is not an unrenamed one.
+#
+# The failure this prevents is subtle. Pushing under a different name instead
+# (`git push origin HEAD:<name>`) leaves the local branch with no upstream, which then
+# blinds the stale-worktree Stop hook — that missing upstream is one of its two signals.
+set -euo pipefail
+
+branch=$(git rev-parse --abbrev-ref HEAD)
+generated="worktree-$(basename "$(git rev-parse --show-toplevel)")"
+
+case "$branch" in
+"$generated")
+	echo "pre-push: refusing to push '$branch'." >&2
+	echo >&2
+	echo "  This is the auto-generated worktree branch name. Rename it first:" >&2
+	echo "      git branch -m <name>" >&2
+	exit 1
+	;;
+esac
