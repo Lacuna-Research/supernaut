@@ -1101,3 +1101,42 @@ gh state, which pre-commit checks must not require. The procedural fix is in
 force instead: merges now delete the branch explicitly (`git push origin
 --delete` + local `-D`) after exiting the worktree, from the repo root, and the
 merge output is no longer filtered.
+
+## Decision — handoff hardening before a context reset
+**Date:** 2026-08-10  **Affects:** this entry; memory notes outside the repo
+
+Audited what was true only in the working session rather than on disk. Three
+gaps found and closed here — the rest of the session's knowledge was already in
+the log, the queue notes, or the scripts themselves, which is the system
+working.
+
+### State at handoff
+
+`main` at "Split prompts 9 and 10 into 9a/9b/10a/10b (#12)"; status **8/12,
+next: prompt 9a** (JIT — its detail is unwritten, four carry-forward notes
+attached). No open PRs, no branches besides main (local or remote), no
+worktrees. Stage 1 remainder: 9a, 9b, 10a, 10b, then the stage acceptance run
+(in 10b) and the forced retrospective — CLAUDE.md prune, docs audit, rule
+review from discipline-stats.txt, cold-start drill — before stage 2 opens.
+All eleven prior prompts/PRs live-verified; the live-run harness asserts 24
+checks and runs only on this Mac (pinned ergo, macos-arm64).
+
+### Things learned that are worth not relearning
+
+- **An interrupted live-run leaves ergo/supernaut processes behind, and the
+  next run then dies instantly with empty output** (all output before the
+  assert block goes to $WORK files, so early death prints nothing). First
+  move when the harness fails weirdly: `pkill -f 'ergo run'; pkill -f
+  'supernaut session'`, then rerun with `KEEP_WORK=1` and read the kept
+  $WORK artifacts.
+- **Patch-script edits fail silently.** Python string-replace no-ops when the
+  target drifted (rustfmt reflowed it, an earlier edit changed it) — this bit
+  four times. Always grep the result after applying a patch script; never
+  trust "applied" output.
+- **My own recurring failure mode, from the register:** filtering command
+  output to reduce noise is how the branch-deletion failure stayed invisible
+  eleven times (Correction, 2026-08-10). Read unfiltered output at least once
+  per new command shape.
+- The reviewer/JIT sub-agent flow is fully specified in SUBAGENT-BRIEFS.md and
+  the diff-capture convention (`git diff --cached --output=target/promptN.diff`)
+  needs no session memory — noted here only to say so.
