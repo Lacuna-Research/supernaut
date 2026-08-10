@@ -9,6 +9,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use havoc_core::connection::io::Security;
+use havoc_core::connection::{SaslConfig, SaslCredentials, SaslMechanism};
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::Storage;
 use havoc_ipc::{BufferId, ConnectionPhase, Event, NetworkId, Request, RequestBody, RequestId};
@@ -28,10 +30,19 @@ pub struct SessionArgs {
     /// Channels to autojoin at registration.
     #[arg(long)]
     pub join: Vec<String>,
-    /// TLS arrives in prompt 6; until then a session is plaintext and must
-    /// say so out loud — and even then, loopback only.
+    /// Plaintext is the loud opt-in (NORTH-STAR §2.3) and loopback-only;
+    /// without it, the session dials TLS and verifies it.
     #[arg(long)]
     pub allow_plaintext: bool,
+    /// Extra PEM trust anchor appended to webpki-roots (for a local ergo's
+    /// generated cert). Verification stays ON — there is no skip-verify.
+    #[arg(long)]
+    pub tls_ca: Option<std::path::PathBuf>,
+    /// SASL PLAIN account. The password comes from SUPERNAUT_SASL_PASSWORD —
+    /// argv is world-readable in ps; env is the debug-grade bridge until
+    /// prompt 10's keyring.
+    #[arg(long)]
+    pub sasl: Option<String>,
     /// Echo raw IRC lines (`>>`/`<<`) to stderr — the transcript capture.
     #[arg(long)]
     pub trace_irc: bool,
@@ -42,19 +53,46 @@ pub struct SessionArgs {
 const NETWORK: NetworkId = NetworkId(1);
 
 pub async fn run(args: SessionArgs) -> Result<(), String> {
-    if !args.allow_plaintext {
-        return Err(
-            "refusing a plaintext session without --allow-plaintext (TLS is the default \
-             path and arrives in prompt 6; NORTH-STAR §2.3)"
-                .to_owned(),
-        );
-    }
-    if !is_loopback(&args.host) {
-        return Err(format!(
-            "--allow-plaintext permits loopback only; {} is not 127.0.0.1/::1/localhost",
+    let security = if args.allow_plaintext {
+        if !is_loopback(&args.host) {
+            return Err(format!(
+                "--allow-plaintext permits loopback only; {} is not 127.0.0.1/::1/localhost",
+                args.host
+            ));
+        }
+        eprintln!(
+            "PLAINTEXT session to {} — nothing on this connection is private",
             args.host
-        ));
-    }
+        );
+        Security::Plaintext
+    } else {
+        if let Some(ca) = &args.tls_ca {
+            eprintln!(
+                "TLS with extra trust anchor {} (verification stays on)",
+                ca.display()
+            );
+        }
+        Security::Tls {
+            server_name: args.host.clone(),
+            ca_file: args.tls_ca.clone(),
+        }
+    };
+
+    let sasl = match &args.sasl {
+        None => None,
+        Some(account) => {
+            let password = std::env::var("SUPERNAUT_SASL_PASSWORD").map_err(|_| {
+                "--sasl requires SUPERNAUT_SASL_PASSWORD in the environment".to_owned()
+            })?;
+            Some(SaslConfig {
+                mechanisms: vec![SaslMechanism::Plain],
+                credentials: SaslCredentials {
+                    authcid: account.clone(),
+                    password,
+                },
+            })
+        }
+    };
 
     let data_dir = match &args.data_dir {
         Some(dir) => dir.clone(),
@@ -68,11 +106,12 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
         name: format!("debug-{}", args.host),
         host: args.host.clone(),
         port: args.port,
+        security,
         connection: havoc_core::connection::Config {
             nick: args.nick.clone(),
             username: args.nick.clone(),
             realname: "supernaut debug session".to_owned(),
-            sasl: None,
+            sasl,
             autojoin: args.join.clone(),
         },
     };

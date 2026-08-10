@@ -733,3 +733,112 @@ one prompt by design ("Examined for a split and left whole" — bus, dispatch,
 transport trait, actor, and CLI are not testable in anger apart), and 400 of the
 lines are the ordered JIT prompt detail plus tests. Splitting would have produced
 two PRs that cannot each pass their own live run.
+
+## Decision — the TLS trust story: webpki-roots plus one named anchor, no off-switch
+**Date:** 2026-08-10  **Affects:** crates/havoc-core (rustls, tokio-rustls, webpki-roots, rustls-pki-types), scripts/check-docs.sh (allowlist), session flags
+
+**Chose:** rustls (ring provider) over tokio-rustls; roots from webpki-roots;
+`--tls-ca <pem>` appends one extra anchor for the local ergo cert with
+verification staying ON. webpki-roots and rustls-pki-types join the allowlist
+under this entry. There is deliberately no `--tls-insecure-skip-verify` and never
+will be — you say what you trust, you never stop verifying (§2.3's loud-opt-in
+shape). SASL passwords enter debug sessions via `SUPERNAUT_SASL_PASSWORD` env,
+never argv (world-readable in ps) — a bridge superseded by prompt 10's keyring.
+**Over:** rustls-platform-verifier / native certs (OS-integration code and
+per-machine nondeterminism for zero stage-1 benefit); a skip-verify flag (the
+trap, permanently declined); aws-lc default provider (ring avoids a C/asm
+toolchain wobble on this Mac).
+**Revisit if:** an enterprise-CA user appears (platform verifier earns its keep)
+or rustls deprecates the ring provider.
+
+## Prompt 6 — Live connection, TLS, and reconnect
+
+**Commit:** PR #9 (squash)  **Date:** 2026-08-10
+
+**Shipped:** TLS as the default path (TlsLineTransport + AnyLineTransport enum in
+io.rs, Security plumbed through NetworkSettings/ActorSpawn), live SASL against
+ergo, reconnect via an attempt loop inside actor run() — fresh Machine per
+attempt, exponential 1s→60s ±50% jitter, counter reset on registration, Failed
+never retried — plus scripts/trace-to-steps.sh, the live-captured
+live_ergo_registration corpus test, two paused-time reconnect tests, and the
+extended live-run.sh (TLS listener, NickServ pre-registration, kill-and-restart
+reconnect proof). PLAN's testing-strategy wording amended (inline Step tables,
+converter — the "fixture files" promise was stale).
+
+**Deviations:** ergo's mkcerts replaced with an openssl cert for the dialed name
+(ergo rejects undotted server names, so mkcerts would mint the wrong CN — the
+detail's own named fallback); the 903 assertion matches ergo's `*`-nick reply;
+Connecting retry detail is "retry <n>" without the delay (the delay is jittered
+after the report; naming it would lie by up to 50%).
+
+**Deferred:** None.
+
+**Learned:** ergo requires a dotted server.name; its SASL numerics use `*` for
+the nick pre-registration; openssl self-signed certs default to CA:TRUE which
+webpki rejects as an end-entity (CaUsedAsEndEntity) — basicConstraints CA:FALSE
+required. rustls built with the ring provider avoids the aws-lc build dep.
+
+**Measured:** full live run (fetch cached, boot, pre-register, TLS+SASL, message,
+kill+restart, re-register): ~15s. Backoff observed live: retry 1..4 while ergo
+was down, then re-registered.
+
+**Live run:** all eleven assertions passed — TLS registration with SASL 903, B's
+message landing, and the invisible-reconnect sequence
+(disconnected → retry → registered again) with no operator action. Libera.Chat
+spot-check: registered over TLS with stock webpki roots
+(`session --host irc.libera.chat --port 6697`); SASL exercised against ergo only
+(no registered Libera account) — recorded honestly. Killing ergo mid-session
+prints one disconnected line per attempt with backoff between, as designed.
+
+**Review:** ran below; dispositions recorded there.
+
+**Carry-forward consumed:** all five notes — backoff written inside run() reading
+state() (Failed → Fatal, never retried; no reset(), fresh Machine per attempt);
+trace filter specified in trace-to-steps.sh's header (the `>> ` user-command
+caveat included); live-run.sh stays scoped to this Mac with the pinned platform
+(recorded, not fixed — CI coverage is the trigger); corpus format decided
+(inline Step tables; PLAN amended); phase()-folding respected — the retry loop
+never consumes reports.
+
+**Carry-forward raised:** see Review.
+
+## Correction — the TLS decision entry misstates its own alternative
+**Date:** 2026-08-10  **Supersedes:** "Decision — the TLS trust story" (2026-08-10)
+**Category:** stale-doc-copy
+
+**Claimed:** "rustls (ring provider) over tokio-rustls" — as written, the entry
+rejects the very crate its Affects line ships.
+**Actually:** the choice was ring **over aws-lc** as rustls's crypto provider,
+*via* tokio-rustls, which is and remains the shipped async TLS layer.
+**Lesson:** a decision entry's Chose/Over pair is load-bearing; a misplaced word
+inverts it, and append-only means it stands until corrected loudly.
+
+**Not mechanizable because:** no check can read intent behind prose in a decision
+entry; the guard is the post-prompt review, which is what caught it.
+
+Prompt 6 Review addendum (dispositions): fixed now, per the review — the backoff
+jitter modulus (subsec_nanos()%1000 is degenerately zero on microsecond-granular
+macOS clocks; now derived from subsec_micros()), the unjustified `logging` feature
+on rustls/tokio-rustls (dropped; `tls12` stays — old ircds are real, and the
+compat choice is now stated here), and the Correction entry above. Recorded as
+deviation, previously missing: the acceptance's "wrong-password test" shipped as
+the cap-NAK fail-closed variant instead — same Failed terminality through a
+different arm; the NAK arm covers the retry-policy contract this prompt owed and
+a 904-path live exchange can join the corpus from a future capture. The
+converter's silent dropping of pre-first-`<<` client lines is now noted here
+(openings are asserted from Machine::start directly). Carry-forward raised, all
+adopted: prompt 7 (re-registration side effects replay; the sleep-poll note
+amended to the four-loop reality), prompt 9 (commands dropped while disconnected
+have no signal), prompt 10 (env/flag installed base must be replaced, not
+extended), stage 5 item 2 (resync must be core-driven off the second
+Registered). Rejected from the harvest: none.
+
+Prompt 6 addendum 2 — a CI-only discipline failure surfaced a portability bug in
+check-docs.sh itself: pipe-fed `grep -q` exits at first match, and under
+`set -euo pipefail` GNU sed upstream dies of SIGPIPE, failing the pipeline
+*because* the match succeeded (BSD sed on the dogfood Mac never surfaced it —
+test-checks.sh's own expect() comment described this exact class). All eight
+pipe-fed `grep -q` sites now read to EOF (`grep ... >/dev/null`); file-arg greps
+keep `-q`. The fixture suite (38) covers the rules' semantics unchanged; the
+SIGPIPE trigger itself is GNU-environment-only and is proven by this PR's own CI
+run going green.

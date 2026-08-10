@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 5/10 complete. Next: prompt 6.
+**Status:** 6/10 complete. Next: prompt 7.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -464,54 +464,154 @@ first try.
 **Item:** Live connection, TLS, and reconnect.
 **Branch:** `prompt-06-live-connection`
 
-The real network path: rustls (TLS by default), real DNS, live SASL against local ergo
-plus a Libera.Chat spot-check; disconnect detection and jittered exponential backoff
-driven through the state machine's reconnect seam. Capture live transcripts from ergo
-and Libera into prompt 4's fixture corpus — that corpus is the durable asset this
-prompt feeds.
+```
+The real network path: after this prompt the debug CLI dials TLS by default and
+verifies it, authenticates over live SASL against a local ergo, survives an ergo
+restart through jittered backoff inside the actor with no operator action, and
+feeds the first live-captured transcripts back into prompt 4's corpus.
 
-**Examined for a split (TLS vs reconnect) and left whole**, because both live in the
-same connect path; splitting them means two prompts editing one function. Revisit if
-the SASL Still-open decision put EXTERNAL/CertFP in scope — that would justify its own
-session.
+Two conflicts between the plan and this prompt's notes, surfaced rather than
+resolved silently:
 
-### Carry-forward
+- PLAN's testing strategy promises transcript "fixture files"; what shipped is
+  inline Rust Step tables, and the note on this prompt forbids a second corpus
+  format. Decided: the corpus stays inline Rust and captures are converted into
+  Step rows; amend PLAN's testing-strategy wording in this PR (a stale doc is
+  fixed in the commit that staled it). Migrating nine transcripts to data files
+  would churn the durable asset mid-stage to buy format purity nobody asked for.
+- The plan item says backoff is driven "through the state machine's seam", but
+  the Failed/Disconnected distinction does not survive the ActorReport boundary
+  — outside the actor task, a refused connect and a fatal SASL failure are both
+  Disconnected-with-detail. The notes win: retry policy is written inside
+  run() in crates/havoc-core/src/connection/actor.rs, reading Machine::state();
+  the plan's sentence is satisfied by the policy consuming the seam
+  (State, on_disconnect), not by the policy living in the machine.
 
-- From prompt 5: **the Failed/Disconnected distinction never leaves the actor
-  task — backoff must be written inside `run()`.** `ActorReport::Phase` in
-  `crates/havoc-core/src/connection/actor.rs` exports only the coarse phase plus
-  a detail string; `Machine::state()` is readable only inside `run()`, and
-  `State::Failed` triggers a bare return. The retry loop must wrap the
-  connect/register head of `run()` (fresh `Machine::start` per attempt), not
-  consume reports downstream — downstream, a refused connect and a fatal SASL
-  failure are both just Disconnected-with-detail.
-- From prompt 5: **the transcript capture is stderr-multiplexed, not a clean
-  stream.** The `>> `/`<< ` lines share stderr with session diagnostics, and
-  live-run.sh redirects all of session A's stderr into `a.trace`. The
-  capture-to-Step-rows converter must filter on the two prefixes, and `>> `
-  covers both machine replies and user-command lines.
-- From prompt 5: **live-run.sh only works on one machine.**
-  `ERGO_PLATFORM=macos-arm64` with a single pinned sha; any other host downloads
-  the wrong tarball and fails the sha check. Budget platform detection or scope
-  this prompt's live run to the dogfood Mac explicitly.
-- From prompt 4: **the transcript corpus is inline Rust, not the fixture files
-  PLAN promised.** The corpus is `Step(&str, &[&str])` tables in
-  `crates/havoc-core/tests/state_machine.rs`. "Capture live transcripts into this
-  corpus" means either generating Rust from captures or migrating to data files
-  first — pick one in the prompt text, or capture produces a second, divergent
-  corpus format.
-- From prompt 4: **`phase()` folds `Failed` and `Disconnected` together — a
-  backoff loop keyed on the phase retries fatal SASL failures forever.**
-  Reconnect policy must read `Machine::state()` and treat `State::Failed`
-  (fail-closed SASL) as no-retry. There is also no re-arm path: `on_disconnect`
-  only marks state and `Machine::start` builds a fresh machine — reconstruct per
-  attempt; do not add a `reset()` mid-session.
+The work:
 
-Do not: CHATHISTORY resync on reconnect (stage 5 — nothing exists to merge into yet),
-storage writes (prompt 7), or any TCP listener/inbound anything (§2.4, stage 6 menu at
-most).
+- TLS transport, crates/havoc-core/src/connection/io.rs: TlsLineTransport over
+  tokio-rustls (rustls and tokio-rustls are already on DEP_ALLOWLIST), plus a
+  two-variant connector enum so run() holds one transport type — LineTransport's
+  RPITIT methods make an enum cheaper than generics here. Root store:
+  webpki-roots, with --tls-ca <pem> appending one extra anchor via
+  rustls-pki-types' pem support. Both crates are new to the allowlist: one
+  BUILD-LOG decision entry for the trust story covers both edits, and an
+  allowlist edit is not a check change, so no test-checks fixtures are owed.
+  webpki-roots over the platform keychain because it is deterministic across
+  machines and adds zero OS-integration code; revisit only if a real
+  enterprise-CA user appears. There is deliberately no
+  --tls-insecure-skip-verify and never will be: --tls-ca keeps verification ON
+  against an anchor you name, which is the §2.3 loud-opt-in shape — you say
+  what you trust, you never switch trust off.
+- Plumb-through: NetworkSettings in crates/havoc-core/src/core.rs and
+  ActorSpawn gain security: Tls { server_name, ca_file } | Plaintext. DNS is
+  already real — TcpStream::connect resolves names — so "real DNS" costs
+  nothing beyond pointing it at a real hostname.
+- CLI, crates/supernaut/src/session.rs: TLS becomes the default; delete the
+  "TLS arrives in prompt 6" refusal. --allow-plaintext remains the loud opt-in
+  and keeps its loopback-only rule — plaintext off-box is the trap, not a
+  feature. New flags: --tls-ca <path>, and --sasl <account> taking the password
+  from SUPERNAUT_SASL_PASSWORD — argv is world-readable in ps, so a --sasl-pass
+  flag would put a secret where CLAUDE.md forbids it; env is the debug-grade
+  middle until prompt 10's keyring. A session running with an extra CA or with
+  plaintext prints one loud line saying so at startup.
+- Reconnect, inside run() in crates/havoc-core/src/connection/actor.rs:
+  restructure into an outer attempt loop wrapping the connect/register head — a
+  fresh Machine::start per attempt, never a reset() (there is no re-arm path,
+  by design). After each attempt ends, read Machine::state():
+  State::Failed { reason } reports Disconnected with the reason and returns —
+  fail-closed SASL is never retried, and this is exactly why the check must be
+  state(), not phase(), which folds Failed into Disconnected. Every other loss
+  (refused connect, EOF, read/send error) reports Disconnected with detail,
+  then backs off: exponential 1s doubling to a 60s cap, ±50% jitter derived
+  from SystemTime subsec nanos — a rand dependency for one jitter fails the
+  allowlist's own justification bar — with the counter reset once an attempt
+  reaches Registered. Each attempt re-emits Connecting with a retry detail,
+  so the loop is greppable in a live run; the stage-2 carry-forward already
+  commits the TUI to deduping repeated Connecting. Commands arriving while
+  disconnected are dropped: autojoin re-fires on the fresh machine, and a
+  PRIVMSG delivered seconds after a reconnect is a surprise, not a feature. A
+  closed command channel exits the actor even mid-backoff-sleep.
+- Loop tests, alongside the actor test in
+  crates/havoc-core/tests/state_machine.rs, under
+  #[tokio::test(start_paused = true)] so backoff timing is asserted without
+  wall-clock cost: (1) a refused connect yields Connecting, Disconnected,
+  Connecting again — retry proven; (2) a scripted tokio TcpListener that speaks
+  the CAP LS / NAK sasl lines yields Disconnected with the SASL reason exactly
+  once and the task ends — Failed is never retried. The listener is a
+  socket-level peer, not a second protocol fake: I/O-layer behavior is
+  precisely this prompt's bug class.
+- scripts/live-run.sh grows the TLS + SASL + reconnect story: generate a
+  self-signed cert for the dialed name; add a TLS listener with cert/key paths
+  inside $WORK; keep a plaintext loopback listener for the harness's own
+  pre-registration exchange. Pre-register the alice account over nc (NickServ
+  REGISTER after 001, recognisably-fake password), poll for success, fail
+  loudly otherwise. Sessions A and B then connect over TLS with --tls-ca and no
+  --allow-plaintext; A adds --sasl alice. Assert the 903 SASL-success line in
+  a.trace. Then the reconnect proof: kill ergo, restart it on the same port
+  with the same config (the datastore in $WORK persists the account), send
+  `wait registered` down A's fifo, and assert a.out shows phase=disconnected, a
+  retry line, and a second phase=registered. That sequence is NORTH-STAR's
+  invisible-reconnect promise observed end to end.
+- Capture into the corpus: scripts/trace-to-steps.sh (set -euo pipefail,
+  shellcheck-clean) converts a trace file into draft Rust Step rows. It must
+  filter on the `>> ` / `<< ` prefixes only — the trace shares stderr with
+  session diagnostics — and its header comment must warn that `>> ` covers
+  user-command lines as well as machine replies, so the output is a draft a
+  person reviews and pastes, never text committed blind. Add the captured ergo
+  TLS+SASL registration as a new test (live_ergo_registration) in
+  crates/havoc-core/tests/state_machine.rs. Redaction rule: never paste a live
+  AUTHENTICATE payload from a real account; the harness credentials are
+  recognisably fake by construction, so the ergo capture is safe.
+- Libera.Chat spot-check, manual and once, deliberately outside the scripted
+  loop (PLAN's testing strategy keeps it there): `session --host
+  irc.libera.chat --port 6697 --nick <scratch> --join <quiet channel>` with no
+  --tls-ca and no --allow-plaintext — the webpki-roots default path is exactly
+  what is being proven. SASL at Libera only if a registered account exists;
+  recording "TLS + registration verified, SASL ergo-only" is the honest entry
+  otherwise. Its capture may join the corpus via the same converter if clean.
+- live-run.sh stays scoped to the dogfood Mac (the pinned ERGO_PLATFORM
+  stands). Platform detection lands when CI actually runs this script; a
+  download matrix nobody executes is speculative surface.
 
-*To be written out before it starts.*
+Acceptance: run scripts/live-run.sh and watch session A register over TLS with
+SASL (the AUTHENTICATE exchange and 903 visible in a.trace) and B's message
+land; then — with no operator action — watch ergo die and restart while A
+prints phase=disconnected, a connecting retry line, and a second
+phase=registered; the script exits 0 and leaves no ergo process and no temp
+dir behind. Run scripts/trace-to-steps.sh over the kept capture and read valid
+Step rows matching the exchange you just watched; cargo test --workspace is
+green including live_ergo_registration and the two paused-time backoff tests,
+with the wrong-password test proving a SASL failure is reported once and never
+retried. Separately, once, connect to irc.libera.chat:6697 with the stock root
+store, register, join, and record the result in BUILD-LOG's Live run section.
+make check green.
+
+Do not: SASL EXTERNAL / CertFP (stage 6 menu — the mechanism slot is shape
+only and the machine work is budgeted there, not here); any skip-verify flag
+or cert-management surface (--tls-ca is the entire local-trust story; a
+verification off-switch is the §2.3 trap and must never exist to be grabbed);
+CHATHISTORY resync on reconnect (stage 5 — nothing exists to merge into yet);
+storage writes or MessageAdded (prompt 7 — the write path gets its own session
+with a flood test); any TCP listener or inbound connection (§2.4; stage 6 menu
+at most); config file or keyring (prompt 10 — flags and one env var are the
+debug surface until then); platform detection in live-run.sh (arrives with CI
+coverage); and no tracing/log framework — the two eprintln! calls remain the
+whole trace story, because the converter now depends on exactly that format.
+```
+
+**Examined for a split (TLS vs reconnect) and left whole**, because both edit the
+connect head of the same `run()` function; splitting them means two prompts editing
+one function. Revisit if the live SASL pre-registration harness fights back — the
+capture-and-corpus work could trail as its own small prompt without touching the
+connect path.
+
+**Status:** complete. Shipped per the JIT detail with recorded deviations: ergo's
+`mkcerts` was replaced by an openssl cert for the *dialed* name (ergo requires a
+dotted server name, so mkcerts would mint the wrong CN — the detail's own named
+fallback), and the 903 assertion matches ergo's `*`-nick reply shape. Live run:
+all eleven assertions passed, including the invisible-reconnect proof; Libera.Chat
+registered over TLS with stock webpki roots (SASL ergo-only, honestly recorded).
 
 ---
 
@@ -574,10 +674,18 @@ scenarios beyond what ergo can produce today (stage 5 tests against a real bounc
   wire ids to storage row ids — same `NetworkId` type both sides — while wire
   `BufferId`s ARE storage rows. Ingest writes must go through the mapping;
   consider a core-private row-id newtype before the write path lands.
-- From prompt 5: **the sleep polls in live-run.sh are waiting for your event.**
-  Two `sleep 0.2` loops exist because there is no MessageAdded to `wait` on.
-  Grow a `wait message` verb and delete both polls, or the never-sleeps
-  determinism claim stays false in the script every later prompt copies.
+- From prompt 5 (amended at 6): **the sleep polls in live-run.sh are waiting
+  for your event — but only some can become `wait` verbs.** Prompt 6 grew the
+  script to four poll loops. Event-shaped ones (B's PRIVMSG landing, the second
+  `phase=registered`) become `wait message`-class verbs and get deleted;
+  harness-level ones (ergo listening, raw-nc pre-registration) are outside any
+  session and stay, honestly commented.
+- From prompt 6: **every reconnect replays the registration side-effect
+  stream.** The attempt loop in `crates/havoc-core/src/connection/actor.rs`
+  builds a fresh Machine per attempt, so phase reports, autojoin, and
+  JoinedChannel re-fire across a restart. The ingest/buffer path must be
+  idempotent across attempts (ensure_buffer's conflict semantics are already
+  flagged above), or a flood test that includes a restart double-creates.
 - From prompt 4: **the machine parses and then discards every non-protocol
   message — ingestion cannot tap it.** `handle_message` in
   `crates/havoc-core/src/connection/mod.rs` drops PRIVMSG/NOTICE/JOIN, and the
@@ -690,6 +798,13 @@ restart, search.
 
 ### Carry-forward
 
+- From prompt 6: **the `SUPERNAUT_SASL_PASSWORD` bridge and the
+  `--sasl`/`--tls-ca` flags are installed base this prompt must replace, not
+  extend.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads the
+  env var; `NetworkSettings.security` carries `{ server_name, ca_file }`. The
+  TOML schema must own per-network tls_ca and the SASL account; the keyring
+  path must delete the env var (replace, don't deprecate); and the
+  loopback-only plaintext rule needs a new home once config supplies the host.
 - From prompt 5: **the debug session hardcodes network identity that config must
   replace.** `const NETWORK: NetworkId = NetworkId(1)` in
   `crates/supernaut/src/session.rs`, and the storage network name is

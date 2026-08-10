@@ -108,7 +108,7 @@ fi
 # A removed line is a rewrite of history. Corrections belong in a new entry.
 # ---------------------------------------------------------------------------
 rule='log-append-only'
-if diff_file BUILD-LOG.md | grep -qE '^-[^-]'; then
+if diff_file BUILD-LOG.md | grep -E '^-[^-]' >/dev/null; then
 	err "BUILD-LOG.md has removed or modified lines. It is append-only; correct in a new entry."
 else
 	ok "BUILD-LOG.md append-only"
@@ -123,14 +123,14 @@ fi
 # existing and the two most often skipped.
 # ---------------------------------------------------------------------------
 rule='log-entry-substance'
-if diff_names | grep -qE "^$SOURCE_DIR/"; then
-	if ! diff_names | grep -qx 'BUILD-LOG.md'; then
+if diff_names | grep -E "^$SOURCE_DIR/" >/dev/null; then
+	if ! diff_names | grep -x 'BUILD-LOG.md' >/dev/null; then
 		err "$SOURCE_DIR/ changed but BUILD-LOG.md did not. Record deviations, surprises, measurements."
 	else
 		log_added=$(added_lines BUILD-LOG.md)
 		missing=""
 		for section in '**Shipped:**' '**Learned:**' '**Live run:**'; do
-			printf '%s\n' "$log_added" | grep -qF "$section" || missing="$missing $section"
+			printf '%s\n' "$log_added" | grep -F "$section" >/dev/null || missing="$missing $section"
 		done
 		if [ -n "$missing" ]; then
 			err "BUILD-LOG.md entry is missing section(s):${missing}. 'None' is a valid body; an absent section is not."
@@ -158,12 +158,12 @@ for entry in PLAN.md "${STAGES[@]}"; do
 		;;
 	esac
 	[ -f "$f" ] || continue
-	if diff_file "$f" | grep -qE '^-(### Carry-forward|\*\*Carry-forward\*\*)'; then
+	if diff_file "$f" | grep -E '^-(### Carry-forward|\*\*Carry-forward\*\*)' >/dev/null; then
 		removed_cf="$removed_cf $f"
 	fi
 done
 if [ -n "$removed_cf" ]; then
-	if added_lines BUILD-LOG.md | grep -qF '**Carry-forward consumed:**'; then
+	if added_lines BUILD-LOG.md | grep -F '**Carry-forward consumed:**' >/dev/null; then
 		ok "carry-forward removal is recorded in BUILD-LOG.md"
 	else
 		err "carry-forward notes removed from${removed_cf} but BUILD-LOG.md's entry has no '**Carry-forward consumed:**' section. Deleting a note and recording it are one act."
@@ -314,7 +314,7 @@ done
 rule='oversize'
 changed=$(diff_numstat "$SOURCE_DIR" | awk '$1 != "-" { n += $1 + $2 } END { print n + 0 }')
 if [ "$changed" -gt "$MAX_PROMPT_CHANGED_LINES" ]; then
-	if added_lines BUILD-LOG.md | grep -qF '**Oversize:**'; then
+	if added_lines BUILD-LOG.md | grep -F '**Oversize:**' >/dev/null; then
 		ok "oversize change ($changed lines) is justified in BUILD-LOG.md"
 	else
 		err "$changed changed lines in $SOURCE_DIR/ (cap $MAX_PROMPT_CHANGED_LINES) with no '**Oversize:**' justification in the BUILD-LOG.md entry. Justify it or split the prompt."
@@ -347,7 +347,7 @@ bad_corrections=$(added_lines BUILD-LOG.md | awk '
 ')
 if [ -n "$bad_corrections" ]; then
 	err "Correction entries without '**Mechanized as:**' or '**Not mechanizable because:**': ${bad_corrections% }"
-elif added_lines BUILD-LOG.md | grep -q '^## Correction'; then
+elif added_lines BUILD-LOG.md | grep '^## Correction' >/dev/null; then
 	ok "correction entries close the mechanization loop"
 fi
 
@@ -422,7 +422,7 @@ fi
 # time a prompt actually needs them — not before.
 # ---------------------------------------------------------------------------
 rule='dep-allowlist'
-DEP_ALLOWLIST=" serde time bitflags clap tokio tokio-util tokio-rustls rustls rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml supernaut supernaut-tui havoc-ipc havoc-core havoc-transport "
+DEP_ALLOWLIST=" serde time bitflags clap tokio tokio-util tokio-rustls rustls rustls-pki-types webpki-roots rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml supernaut supernaut-tui havoc-ipc havoc-core havoc-transport "
 
 # Dependency crate names declared in a Cargo.toml: keys inside any *dependencies*
 # section, plus the `[dependencies.foo]` header form. Does not resolve `package = `

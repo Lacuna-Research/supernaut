@@ -100,10 +100,13 @@ and gets a decision entry.
 
 ### Testing strategy
 
-- Unit: table-driven transcript tests for the connection state machine — fixture files
-  of server lines → expected client lines and state, covering cap negotiation, SASL,
-  registration, `CAP NEW`/`CAP DEL` (§6.8). Hand-written first; live-captured
-  transcripts are appended to the corpus from prompt 6 on. Storage tested against real
+- Unit: table-driven transcript tests for the connection state machine — inline
+  `Step` tables (server line → expected client lines) in
+  `crates/havoc-core/tests/state_machine.rs`, covering cap negotiation, SASL,
+  registration, `CAP NEW`/`CAP DEL` (§6.8). Hand-written first; live captures are
+  converted into Step rows by `scripts/trace-to-steps.sh` and appended to the same
+  corpus (one format, deliberately — amended at prompt 6 from the original
+  "fixture files" wording). Storage tested against real
   temp-file SQLite — never mocked; it is embedded and fast.
 - Integration: the connection actor runs against a scripted fake implementing the
   line-transport trait; the whole core is driven through the typed `havoc-ipc` boundary
@@ -291,6 +294,14 @@ Covers NORTH-STAR §8 M6.
 2. **`CHATHISTORY` resync.** Reconnect fetches only what was missed, merges by `msgid`,
    renders in order with original timestamps (§7.2). Tested against a bouncer/ergo
    replaying (§6.4) — the laptop-lid test, with zero duplicates.
+
+   ### Carry-forward
+   - From stage 1 prompt 6: **the actor keeps no memory across attempts — resync
+     must be core-driven off the second Registered.** The attempt loop in
+     `crates/havoc-core/src/connection/actor.rs` discards the Machine per
+     attempt and commands are dropped while disconnected, so resync fired at
+     the Disconnected edge dies silently; key it off the Registered transition
+     in core, tolerant of the command-drop window.
 3. **Notifications.** `notify-rust` on highlight and PM, rate-limited, suppressed when
    focused; OSC 9/777 fallback over SSH (§7.6).
 4. **Command palette and fuzzy everything.** `nucleo` across commands, buffers, nicks,
