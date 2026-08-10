@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 7/10 complete. Next: prompt 8.
+**Status:** 8/10 complete. Next: prompt 9.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -800,57 +800,134 @@ a-priori argument, numbers recorded. All 16 live assertions green.
 **Item:** Full-text search.
 **Branch:** `prompt-08-search`
 
-Search that is actually search (§7.1): the FTS5 external-content table added by
-migration and kept in sync with `message`; the `Search` request with structural
-filters — `from:`, `in:`, time range — planned against real indexes; results delivered
-as events (never blocking anything, §6.6); a debug CLI `search` command. Seed a corpus
-in the live run and show search staying instant.
+```
+The flagship, headless (§7.1): after this prompt a person searches all history
+instantly from the debug CLI — `search from:bob in:#supernaut "deployment
+failed"` — with the FTS index arriving as migration 0002 and backfilling
+everything prompt 7 already wrote, which is the payoff migrations-first was
+built for.
+
+One conflict between the plan item and this prompt's notes, surfaced rather
+than resolved silently:
+
+- The plan item says "FTS5 external-content table", but external-content sync
+  keys on content_rowid and message in
+  crates/havoc-core/migrations/0001_init.sql is WITHOUT ROWID — there is no
+  rowid for the contract to hold on. The note wins: migration 0002 creates a
+  plain self-contained FTS5 table instead, and the PLAN item's wording is
+  amended in this PR (a stale doc is fixed in the commit that staled it).
+  Contentless-delete FTS5 with a docid-mapping table was weighed and
+  rejected: it saves the duplicated text bytes at the price of a second
+  table, a docid allocator, and a three-way join on every query — disk is
+  the cheap resource in this trade, moving parts are not.
+
+The work:
+
+- Migration 0002, crates/havoc-core/migrations/0002_fts.sql, appended to
+  MIGRATIONS in crates/havoc-core/src/storage/migrations.rs. Contents:
+  CREATE VIRTUAL TABLE message_fts USING fts5(text, buffer_id UNINDEXED,
+  seq UNINDEXED) — text is the only indexed column; identity rides along
+  unindexed and everything else hydrates from message by (buffer_id, seq),
+  the source of truth. An AFTER INSERT trigger on message keeps it in sync
+  (WHEN new.text IS NOT NULL), and a backfill INSERT..SELECT indexes every
+  existing row in the same migration transaction. Sync-by-trigger rather
+  than by Rust, deliberately: the FTS write becomes structurally part of the
+  statement that inserts the row, so no future insert path can forget it,
+  ON CONFLICT DO NOTHING dedup hits never fire it, and rollback carries it
+  for free. No UPDATE/DELETE triggers: message is append-only and retention
+  owes its own migration (stage 6).
+- FTS5 availability, confirmed rather than assumed: rusqlite's bundled build
+  compiles -DSQLITE_ENABLE_FTS5 unconditionally (libsqlite3-sys build.rs,
+  verified in the vendored source) — no cargo feature, no manifest change,
+  no allowlist edit. Were that ever wrong, migration 0002 fails loudly at
+  first startup, which is the check.
+- The rollback story: the trigger fires inside write_batch's transaction, so
+  a failed batch rolls the FTS rows back with it and the existing cache
+  invalidation stands unchanged. Test the mid-batch failure this demands.
+- Search rides the job queue — the one-connection question, decided:
+  Job::Search executes on the storage thread's single connection, after the
+  existing flush-before-non-ingest barrier, so read-your-writes holds. The
+  second read-only WAL connection is rejected: it silently forfeits exactly
+  that to fix a latency problem nobody has measured; revisit on dogfood
+  evidence.
+- The lane, the ClientId gap, and the error story, one shape: Job::Search
+  { spec, client, request, reply } is fire-and-forget like Job::Ingest, with
+  (client, request) echoed through untouched. handle_request becomes
+  handle_request(state, client, request) -> Option<Response>; the Search arm
+  parses, enqueues, and returns None — exactly-one-Response promises one
+  response, not an instant one. On outcome, core sends Directed::Response
+  first — Ack, or Error carrying the SQLite message for a malformed MATCH —
+  then Directed::Event(SearchResults) on Ack only, both via
+  Bus::direct(client, ..). The broadcast debug_assert stays as the
+  structural guard.
+- The grammar, core-side over the frozen wire: a new module
+  crates/havoc-core/src/search.rs parses the plain string into SearchSpec
+  { match_query, nick, buffer, after, before } with a quote-aware scanner:
+  from:/in: exact filters (ASCII NOCASE — matches ergo's casemapping;
+  rfc1459 folding deferred until a real network bites), after:/before:
+  accepting YYYY[-MM[-DD]] expanded via ingest's days_from_civil. Everything
+  else passes to MATCH verbatim — phrase search for free. A filter-shaped
+  token inside quotes is text. Parse errors (duplicate filter, bad date,
+  no text terms) are immediate Error responses — a filters-only query is a
+  backlog scan wearing search's clothes, and scans are prompt 9's.
+- The query: message_fts MATCH joined to message on (buffer_id, seq);
+  buffer filter by name against the buffer table (history from before this
+  process searches too); server_time range as a display-time filter (§6.1
+  permits exactly this); ORDER BY rank (stock bm25, used, never tuned);
+  LIMIT SEARCH_MAX_HITS = 100, the §6.3 posture — the wire has no has-more
+  berth, so a full window means "refine the query" and the CLI's hits count
+  keeps truncation visible. kind_from_code inverse added, loud on unknown
+  codes.
+- CLI: `search <rest of line>` — the raw remainder, not whitespace-split
+  parts, or quoting dies before core sees it — plus `wait search [count]
+  [secs]`, and one greppable line per hit.
+- scripts/live-run.sh, a search segment after the reconnect proof: the
+  deployment line found; from:bob 1 hit / from:carol 0; the phrase
+  "flood line 250" exactly once; before:2020 → 0; read-your-writes — the
+  fresh line's echo arrives (harness-level trace wait: the echo is network,
+  not storage), then search with no further delay finds it through the
+  flush barrier; a malformed MATCH errors and the session survives; search
+  wall time recorded, not asserted.
+- Tests: migration 0002 on fresh and on a version-1 file whose backfill
+  makes old rows searchable; trigger sync + dedup-indexes-nothing +
+  NULL-text absent; the mid-batch rollback test; the scanner units; the
+  100-hit cap; and a two-session dispatch-level test — A's search yields
+  Response-then-SearchResults in order on A's directed lane while B's lanes
+  stay silent. schema_matches_north_star extended to the new objects.
+
+Acceptance: run scripts/live-run.sh and, after the flood and the restart,
+watch A answer `search from:bob deployment` with the hit line and
+`search in:#flood "flood line 250"` with exactly one hit; watch a line sent
+moments earlier come back from search through the flush barrier; a
+malformed query errors and the session keeps running; the script exits 0.
+After it, sqlite3 proves the index is real on disk. cargo test --workspace
+green including the v1-upgrade and rollback tests; make check green.
+
+Do not: jump-to-context (prompt 9 — AroundSearchHit belongs to the backlog
+API); saved searches / virtual buffers (stage 6 menu); ranking beyond ORDER
+BY rank — no bm25 weights, no snippet()/highlight() (presentation, stage
+2+); filters beyond from:/in:/after:/before:; a second read-only connection
+(dogfood evidence first); FTS UPDATE/DELETE sync (retention's migration,
+stage 6); wire changes of any kind (PROTOCOL_VERSION stays 1); new
+dependencies; and no async facade over StorageClient — the search lane
+copies the ingest lane's fire-and-forget shape.
+```
 
 **Examined for a split (index vs query language) and left whole**, because the filter
 grammar and the index shape must be designed together or the filters end up
 unindexable. Revisit if the filter grammar grows past the three filters named here —
 anything more is stage 2+ polish.
 
-Do not: jump-to-context around a hit (prompt 9 — AroundSearchHit belongs to the
-backlog API), saved searches / virtual buffers (§7.1 extension, stage 6 menu), or any
-ranking work beyond FTS5 defaults.
-
-*To be written out before it starts.*
-
-### Carry-forward
-
-- From prompt 2: **Search's wire shape is frozen: verbatim string in, events
-  out.** `RequestBody::Search { query: String }` in `crates/havoc-ipc/src/lib.rs`
-  (core parses `from:`/`in:`) and no search variant on `ResponseBody`. Structured
-  filter fields or a synchronous results response are wire changes — design the
-  filter grammar as core-side parsing of a plain string with no wire cooperation.
-- From prompt 7: **a failed batch used to poison the writer caches; FTS sync is
-  the first realistic new error source in that transaction.** `write_batch` in
-  `crates/havoc-core/src/storage/exec.rs` now clears `WriterState.buffers` and
-  `next_seq` on rollback — the FTS-sync writes this prompt adds join exactly
-  that transaction, so its error story must keep the invalidation correct (and
-  test a mid-batch failure).
-- From prompt 7: **flush-before-reads guards only the storage thread's own job
-  queue.** A second read-only WAL connection (the option weighed below for
-  search) bypasses the flush barrier and can read up to 256 rows / ~100ms
-  stale — choosing it silently forfeits read-your-writes. Either search rides
-  the job queue, or the prompt accepts and documents the staleness window.
-- From prompt 5: **request dispatch discards the `ClientId` before the handler
-  runs.** `handle_request` in `crates/havoc-core/src/core.rs` receives neither
-  the client id nor the bus; SearchResults must go out `Bus::direct(client, ..)`
-  and `Bus::broadcast`'s debug_assert fires if routed the easy way. Plan the
-  signature change into the prompt text.
-- From prompt 3: **`message` is WITHOUT ROWID — FTS5 external-content's rowid
-  contract cannot hold.** External-content FTS5 (`content='message'`) syncs by
-  `content_rowid`, and `message` in `crates/havoc-core/migrations/0001_init.sql`
-  has no rowid at all. Design the FTS migration around contentless-delete FTS5 or
-  an explicit docid mapping *before* the session starts — this is a schema-design
-  question, not an implementation detail.
-- From prompt 3: **one connection, one FIFO — search queues behind batched
-  writes.** `run` in `crates/havoc-core/src/storage/mod.rs` drains a single job
-  queue on the single connection, and prompt 7 holds that thread in ~100ms write
-  transactions. WAL permits a second read-only connection; decide deliberately
-  whether search gets its own reader, in the prompt text.
+**Status:** complete. Shipped per the JIT detail, and the flood harness earned its
+keep twice over: it exposed a real product deadlock — the core↔actor channel cycle
+(core blocked on a full command lane while the actor blocked on a full report
+lane), which stalled the flood at ~430/500 and got the client sendq-killed by ergo
+— fixed by making the report lane unbounded (the storage queue's own never-drop-
+history argument) with reads biased first in the actor; and it surfaced the FTS5
+hyphen trap (`xyzzy-quicksilver` parses as column-filter syntax and errors
+cleanly — the Error path working as designed, recorded for stage 2's /search UX).
+The read-your-writes proof waits for the echo (network), then searches with no
+further delay (storage). Four consecutive 24/24 live runs.
 
 ---
 
@@ -902,6 +979,12 @@ restart, search.
 
 ### Carry-forward
 
+- From prompt 8: **`in:` resolves buffer names across every network row.**
+  `run_search` in `crates/havoc-core/src/storage/exec.rs` filters by name with
+  no network scope, and reused data dirs accrete one `debug-<host>` network row
+  per host string — one channel name silently unions histories across
+  networks. Decide scoping here, where config becomes the authority for
+  network identity.
 - From prompt 6: **the `SUPERNAUT_SASL_PASSWORD` bridge and the
   `--sasl`/`--tls-ca` flags are installed base this prompt must replace, not
   extend.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads the

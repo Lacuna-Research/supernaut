@@ -5,4 +5,5 @@
 pub mod bus;
 pub mod connection;
 pub mod core;
+pub mod search;
 pub mod storage;

@@ -10,7 +10,10 @@ use rusqlite::Connection;
 
 /// Ordered and append-only. Index 0 runs first; `user_version` records how
 /// many entries have been applied.
-const MIGRATIONS: &[&str] = &[include_str!("../../migrations/0001_init.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("../../migrations/0001_init.sql"),
+    include_str!("../../migrations/0002_fts.sql"),
+];
 
 /// What `migrate` did, so callers can make it observable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

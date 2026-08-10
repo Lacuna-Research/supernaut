@@ -12,6 +12,7 @@
 
 mod exec;
 mod migrations;
+mod query;
 
 use std::fmt;
 use std::path::Path;
@@ -79,6 +80,23 @@ pub fn kind_code(kind: MessageKind) -> i64 {
     }
 }
 
+/// The inverse of [`kind_code`], for hydrating search hits. Loud on an
+/// unknown code — a row this build cannot name is a bug, never a default.
+pub fn kind_from_code(code: i64) -> Option<MessageKind> {
+    Some(match code {
+        0 => MessageKind::Privmsg,
+        1 => MessageKind::Notice,
+        2 => MessageKind::Join,
+        3 => MessageKind::Part,
+        4 => MessageKind::Quit,
+        5 => MessageKind::Mode,
+        6 => MessageKind::Topic,
+        7 => MessageKind::Nick,
+        8 => MessageKind::Server,
+        _ => return None,
+    })
+}
+
 /// The stable `buffer.kind` column encoding of [`BufferKind`] — matches the
 /// snake_case the wire uses, by choice recorded here rather than by accident
 /// of a serde attribute elsewhere.
@@ -112,6 +130,16 @@ pub struct Ingest {
     pub msgid: Option<String>,
     /// Remaining tags, stored as CBOR (NULL when empty).
     pub tags: BTreeMap<String, String>,
+}
+
+/// A finished search, correlated back to its requester.
+#[derive(Debug)]
+pub struct SearchOutcome {
+    pub client: crate::bus::ClientId,
+    pub request: havoc_ipc::RequestId,
+    /// Err carries the SQLite message (a malformed MATCH string is user
+    /// input; it comes back as a Response::Error, never a hang).
+    pub result: Result<Vec<(BufferId, StoredMessage)>, String>,
 }
 
 /// What one ingest produced, reported after commit.
@@ -150,6 +178,15 @@ enum Job {
         name: String,
         kind: BufferKind,
         reply: mpsc::Sender<Result<BufferId, StorageError>>,
+    },
+    /// Search rides this same queue (read-your-writes: the run loop flushes
+    /// pending ingests before any non-ingest job). Fire-and-forget like
+    /// Ingest; the outcome carries the correlation back.
+    Search {
+        spec: crate::search::SearchSpec,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<SearchOutcome>,
     },
     /// The write path: fire-and-forget; the outcome arrives on the tokio
     /// sender after the batch commits.
@@ -249,6 +286,23 @@ impl StorageClient {
         })
     }
 
+    /// Fire-and-forget search on the storage thread's single connection —
+    /// after the flush barrier, so a send followed by a search finds the line.
+    pub fn search(
+        &self,
+        spec: crate::search::SearchSpec,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<SearchOutcome>,
+    ) -> Result<(), StorageError> {
+        self.send(Job::Search {
+            spec,
+            client,
+            request,
+            reply,
+        })
+    }
+
     pub fn ensure_buffer(
         &self,
         network: NetworkRow,
@@ -280,116 +334,4 @@ impl Drop for Storage {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use havoc_ipc::MessageKind;
-
-    fn temp_store() -> (std::path::PathBuf, Storage, StorageClient) {
-        let dir = std::env::temp_dir().join(format!(
-            "havoc-ingest-{}-{:p}",
-            std::process::id(),
-            &std::process::id() as *const _
-        ));
-        std::fs::create_dir_all(&dir).expect("temp dir");
-        let path = dir.join("ingest.db");
-        let _ = std::fs::remove_file(&path);
-        let (storage, _) = Storage::open(&path, false).expect("open");
-        let client = storage.client();
-        (dir, storage, client)
-    }
-
-    fn item(msgid: Option<&str>, text: &str, millis: i64) -> Ingest {
-        Ingest {
-            target: "#supernaut".to_owned(),
-            kind: MessageKind::Privmsg,
-            nick: Some("alice".to_owned()),
-            account: None,
-            text: Some(text.to_owned()),
-            server_time: ServerTime::from_unix_millis(millis),
-            msgid: msgid.map(str::to_owned),
-            tags: BTreeMap::new(),
-        }
-    }
-
-    fn drain(rx: &mut tokio::sync::mpsc::Receiver<IngestOutcome>, n: usize) -> Vec<IngestOutcome> {
-        let mut out = Vec::new();
-        while out.len() < n {
-            out.push(rx.blocking_recv().expect("outcome"));
-        }
-        out
-    }
-
-    /// Same msgid twice → one row, one event; dedup consumes no seq. The
-    /// entire idempotency story hangs on ON CONFLICT DO NOTHING reporting
-    /// zero changed rows — this test is that assumption, exercised.
-    #[test]
-    fn msgid_dedup_yields_one_row_and_one_event() {
-        let (dir, storage, client) = temp_store();
-        let row = client.ensure_network("libera").expect("network");
-        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-
-        client
-            .ingest(
-                NetworkId(1),
-                row,
-                item(Some("m1"), "hello", 1_000),
-                tx.clone(),
-            )
-            .expect("send");
-        client
-            .ingest(
-                NetworkId(1),
-                row,
-                item(Some("m1"), "hello", 1_000),
-                tx.clone(),
-            )
-            .expect("send");
-        client
-            .ingest(NetworkId(1), row, item(Some("m2"), "again", 2_000), tx)
-            .expect("send");
-
-        let outcomes = drain(&mut rx, 3);
-        assert!(outcomes[0].buffer_created, "first touch creates the buffer");
-        assert_eq!(outcomes[0].message.as_ref().expect("inserted").seq, Seq(1));
-        assert!(outcomes[1].message.is_none(), "duplicate msgid: no event");
-        assert!(!outcomes[1].buffer_created);
-        assert_eq!(
-            outcomes[2].message.as_ref().expect("inserted").seq,
-            Seq(2),
-            "dedup must not consume a seq"
-        );
-
-        drop(storage);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// Tagless identity: same (nick, text) in one 30s bucket collapses to one
-    /// row — §6.5's replay-safety trade, accepted and pinned.
-    #[test]
-    fn tagless_bucket_collapses_and_distinct_text_does_not() {
-        let (dir, storage, client) = temp_store();
-        let row = client.ensure_network("libera").expect("network");
-        let (tx, mut rx) = tokio::sync::mpsc::channel(16);
-
-        client
-            .ingest(NetworkId(1), row, item(None, "hello", 1_000), tx.clone())
-            .expect("send");
-        client
-            .ingest(NetworkId(1), row, item(None, "hello", 14_000), tx.clone())
-            .expect("send");
-        client
-            .ingest(NetworkId(1), row, item(None, "different", 14_500), tx)
-            .expect("send");
-
-        let outcomes = drain(&mut rx, 3);
-        assert!(outcomes[0].message.is_some());
-        assert!(
-            outcomes[1].message.is_none(),
-            "same bucket, same content: collapsed"
-        );
-        assert!(outcomes[2].message.is_some(), "different text inserts");
-
-        drop(storage);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-}
+mod tests;

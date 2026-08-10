@@ -30,7 +30,7 @@ async fn actor_map_reports_connecting_then_disconnected() {
     use havoc_core::connection::Networks;
     use havoc_core::connection::actor::{self, ActorReport, ActorSpawn};
 
-    let (reports_tx, mut reports) = tokio::sync::mpsc::channel(16);
+    let (reports_tx, mut reports) = tokio::sync::mpsc::unbounded_channel();
     let mut networks = Networks::default();
     // Reserved port with nothing listening: connect must fail fast.
     let handle = actor::spawn(ActorSpawn {
@@ -76,7 +76,7 @@ async fn refused_connect_retries_through_backoff() {
     use havoc_core::connection::actor::{self, ActorReport, ActorSpawn};
     use havoc_core::connection::io::Security;
 
-    let (reports_tx, mut reports) = tokio::sync::mpsc::channel(64);
+    let (reports_tx, mut reports) = tokio::sync::mpsc::unbounded_channel();
     let handle = actor::spawn(ActorSpawn {
         network: NetworkId(1),
         host: "127.0.0.1".to_owned(),
@@ -143,7 +143,7 @@ async fn sasl_denial_is_reported_once_and_never_retried() {
         }
     });
 
-    let (reports_tx, mut reports) = tokio::sync::mpsc::channel(64);
+    let (reports_tx, mut reports) = tokio::sync::mpsc::unbounded_channel();
     let handle = actor::spawn(ActorSpawn {
         network: NetworkId(1),
         host: "127.0.0.1".to_owned(),

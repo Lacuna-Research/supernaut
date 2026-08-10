@@ -15,8 +15,10 @@ use std::time::{Duration, Instant};
 use havoc_ipc::{BufferId, BufferKind, NetworkId, Seq};
 use rusqlite::Connection;
 
+use super::query::run_search;
 use super::{
-    Ingest, IngestOutcome, Job, NetworkRow, StorageError, StoredMessage, buffer_kind_str, kind_code,
+    Ingest, IngestOutcome, Job, NetworkRow, SearchOutcome, StorageError, StoredMessage,
+    buffer_kind_str, kind_code,
 };
 
 const MAX_BATCH_ROWS: usize = 256;
@@ -105,6 +107,19 @@ pub(super) fn run(conn: Connection, jobs: &mpsc::Receiver<Job>, trace: bool) {
                         reply,
                     } => {
                         let _ = reply.send(ensure_buffer(&conn, network, &name, kind));
+                    }
+                    Job::Search {
+                        spec,
+                        client,
+                        request,
+                        reply,
+                    } => {
+                        let result = run_search(&conn, &spec);
+                        let _ = reply.blocking_send(SearchOutcome {
+                            client,
+                            request,
+                            result,
+                        });
                     }
                     Job::Ingest { .. } => unreachable!("handled above"),
                     Job::Shutdown => return,

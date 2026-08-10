@@ -165,9 +165,11 @@ genuinely is.
    `seq` assigned at insert, `msgid` dedup enforced by the unique index at the storage
    layer, content-hash fallback for tagless servers, batched transactions on a ~100ms
    timer (§4.6, §6.4, §6.5).
-8. **Full-text search.** FTS5 external-content table added by migration and kept in
-   sync; `Search` with structural filters (`from:`, `in:`, time range) per §7.1;
-   results delivered as events; a CLI `search` command against a seeded corpus.
+8. **Full-text search.** A self-contained FTS5 table added by migration and
+   trigger-synced (external-content cannot bind to the WITHOUT ROWID message
+   table — amended at prompt 8); `Search` with structural filters (`from:`,
+   `in:`, time range) per §7.1; results delivered as correlated events; a CLI
+   `search` command against a seeded corpus.
 9. **Windowed backlog and read markers.** `FetchBacklog` with all four anchors
    including `AroundSearchHit`, limit capped server-side regardless of the request
    (§4.7, §6.3); `last_read_seq` set/read per buffer. Still no "give me the buffer".
@@ -223,6 +225,10 @@ Covers NORTH-STAR §8 M3.
    nick completion.
 
    ### Carry-forward
+   - From stage 1 prompt 8: **bare hyphenated search terms are FTS5 column-
+     filter syntax** (`xyzzy-quicksilver` → "no such column") — the error
+     returns cleanly, but the `/search` UX here should quote bare terms
+     containing FTS5 operator characters before they reach the wire.
    - From stage 1 prompt 7: **QUIT and NICK are not ingested — they fan out to
      every shared channel, which needs the membership state nick completion
      builds here.** The classifier in

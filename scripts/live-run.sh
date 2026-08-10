@@ -15,6 +15,10 @@ trap '' PIPE
 
 cd "$(git rev-parse --show-toplevel)"
 
+# The harness must not depend on ambient PATH (a bare invocation from a
+# fresh shell died at 'cargo: command not found' with zero output).
+command -v cargo >/dev/null 2>&1 || PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH"
+
 ERGO_VERSION=2.19.1
 ERGO_SHA256=1bd97a0917036061e2dcdfc29149c2e252e3bc856282e0956afa2aaaa54dd787
 ERGO_PLATFORM=macos-arm64 # the dogfood machine; extend when CI runs this
@@ -232,6 +236,47 @@ for _ in $(seq 1 150); do
 	[ "$(grep -c 'waited registered' "$WORK/a.out")" -ge 2 ] && break
 	sleep 0.2
 done
+# A's joins were verbs, not autojoin config: re-join after the restart, and
+# sync on the Join row's own MessageAdded (#supernaut count: A join, B join,
+# B privmsg, then this re-join = 4).
+printf 'join #supernaut\nwait message #supernaut 4 10\n' >&3 || true
+for _ in $(seq 1 50); do
+	[ "$(grep -c 'waited message #supernaut' "$WORK/a.out")" -ge 2 ] && break
+	sleep 0.2
+done
+# --- Search (prompt 8): by now the corpus spans two channels and a restart.
+SEARCH_START=$(date +%s)
+printf 'search deployment\nwait search 1 10\n' >&3 || true
+for _ in $(seq 1 50); do
+	grep -q 'waited search' "$WORK/a.out" && break
+	sleep 0.2
+done
+SEARCH_SECS=$(($(date +%s) - SEARCH_START))
+printf 'search from:bob deployment\nwait search 2 10\n' >&3 || true
+printf 'search from:carol deployment\nwait search 3 10\n' >&3 || true
+printf 'search in:#flood "flood line 250"\nwait search 4 10\n' >&3 || true
+printf 'search before:2020 deployment\nwait search 5 10\n' >&3 || true
+# Read-your-writes: wait (harness-level — the echo's arrival is network, not
+# storage) for the fresh line's echo in the raw trace, then search with no
+# further delay: the job-queue flush barrier must make it visible.
+printf 'send #supernaut xyzzysearchtoken\n' >&3 || true
+for _ in $(seq 1 50); do
+	grep -q '^<< .*PRIVMSG #supernaut :xyzzysearchtoken' "$WORK/a.trace" && break
+	sleep 0.2
+done
+printf 'search xyzzysearchtoken\nwait search 6 10\n' >&3 || true
+for _ in $(seq 1 75); do
+	grep -q 'waited search 6\|event search-results request=[0-9]* hits=1' "$WORK/a.out" &&
+		[ "$(grep -c 'waited search' "$WORK/a.out")" -ge 6 ] && break
+	sleep 0.2
+done
+# Malformed MATCH: an error response, and the session keeps running.
+printf 'search "\n' >&3 || true
+for _ in $(seq 1 25); do
+	grep -q '^error ' "$WORK/a.out" && break
+	sleep 0.2
+done
+
 printf 'quit\n' >&3 || true
 exec 3>&-
 wait "$A_PID" 2>/dev/null || true
@@ -283,6 +328,24 @@ else
 	fail=1
 fi
 
+assert "$WORK/a.out" 'hit .*text=the deployment failed' 'search found the deployment line'
+assert "$WORK/a.out" 'hit .*text=flood line 250' 'phrase+buffer filter found exactly the one line'
+if [ "$(grep -c 'hit .*text=flood line 250' "$WORK/a.out")" -eq 1 ]; then
+	printf 'ok    %s\n' 'phrase search did not match the 2500-prefix'
+else
+	printf 'FAIL  %s\n' 'phrase search did not match the 2500-prefix' >&2
+	fail=1
+fi
+if [ "$(grep -c 'event search-results request=[0-9]* hits=0' "$WORK/a.out")" -ge 2 ]; then
+	printf 'ok    %s\n' 'nick and time filters excluded correctly (two empty result sets)'
+else
+	printf 'FAIL  %s\n' 'nick and time filters excluded correctly' >&2
+	fail=1
+fi
+assert "$WORK/a.out" 'hit .*text=xyzzysearchtoken' 'read-your-writes: fresh line searchable through the flush barrier'
+assert "$WORK/a.out" '^error [0-9]' 'malformed MATCH came back as an error, session survived'
+printf 'ok    search wall time %ss over the %s-commit corpus (recorded, not asserted)\n' "$SEARCH_SECS" "$COMMITS"
+
 # Post-mortem, from outside the process: WAL held, seq contiguous, no dupes.
 DB="$WORK/data-a/history.db"
 JOURNAL=$(sqlite3 "$DB" 'PRAGMA journal_mode')
@@ -291,8 +354,15 @@ ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM message WHERE buffer_id = $FLOOD_BUF 
 MAXSEQ=$(sqlite3 "$DB" "SELECT MAX(seq) FROM message WHERE buffer_id = $FLOOD_BUF")
 ALLROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM message WHERE buffer_id = $FLOOD_BUF")
 DISTINCT=$(sqlite3 "$DB" "SELECT COUNT(DISTINCT text) FROM message WHERE buffer_id = $FLOOD_BUF AND kind = 0")
+FTS_ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH 'flood'")
 if [ "$JOURNAL" = wal ] && [ "$ROWS" -eq 500 ] && [ "$DISTINCT" -eq 500 ] && [ "$ALLROWS" -eq "$MAXSEQ" ]; then
 	printf 'ok    %s (journal=%s rows=%s distinct=%s seq contiguous at %s)\n' 'history survived on disk' "$JOURNAL" "$ROWS" "$DISTINCT" "$MAXSEQ"
+	if [ "$FTS_ROWS" -ge 500 ]; then
+		printf 'ok    %s (%s indexed)\n' 'the FTS index is real on disk' "$FTS_ROWS"
+	else
+		printf 'FAIL  %s (%s indexed)\n' 'the FTS index is real on disk' "$FTS_ROWS" >&2
+		fail=1
+	fi
 else
 	printf 'FAIL  %s (journal=%s rows=%s distinct=%s maxseq=%s allrows=%s)\n' 'history survived on disk' "$JOURNAL" "$ROWS" "$DISTINCT" "$MAXSEQ" "$ALLROWS" >&2
 	fail=1

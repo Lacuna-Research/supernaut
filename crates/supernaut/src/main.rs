@@ -2,6 +2,7 @@
 //! §4.2 and its naming amendment (Supernaut app, havoc engine).
 
 mod session;
+mod session_print;
 mod wiring;
 
 use std::path::PathBuf;
