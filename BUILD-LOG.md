@@ -542,3 +542,89 @@ calling thread — decide the async bridge; tags-as-CBOR needs ciborium in
 havoc-core), prompt 8 (WITHOUT ROWID vs FTS5 external-content; search queues
 behind the single write FIFO), stage 6 item 1 (last_read_seq is single-marker disk
 shape). Rejected from the harvest: none.
+
+## Decision — irc-proto for Message parse/serialize only
+**Date:** 2026-08-10  **Affects:** crates/havoc-core/Cargo.toml, prompt 4
+
+**Chose:** `irc-proto` 1.1 as havoc-core's parser dependency — `Message`,
+`Command`, `CapSubCommand`, `Response` as plain data types. The connection state
+machine, cap negotiation ordering, SASL, and reconnect stay ours (NORTH-STAR §5.2:
+that is the product). Base64 for the SASL PLAIN payload is sixteen hand-rolled,
+RFC-vector-tested lines rather than a base64 crate — encode-only, one call site.
+**Over:** the `irc` crate's `Client` half (fuses connection/config/stream — §5.2
+rejected it); writing the tag/prefix/trailing parser ourselves (§5.2: years of
+real-server exposure for a plain data type is not worth redoing); a base64 crate
+(a dependency for sixteen lines).
+**Because:** already argued in NORTH-STAR §5.2; this entry records the version and
+the base64 sub-choice. Vendoring remains the escape hatch if irc-proto stagnates.
+**Revisit if:** SASL ever needs base64 *decoding* (server challenges beyond "+") —
+that is the moment the crate earns its place.
+
+## Prompt 4 — Connection state machine, offline
+
+**Commit:** PR #7 (squash)  **Date:** 2026-08-10
+
+**Shipped:** the connection state machine in havoc-core — CAP LS 302 through
+steady state with the §6.8 cap rules, SASL PLAIN (fail-closed), ISUPPORT parsing,
+autojoin, PING/PONG, the named reconnect seam, and the `Networks` actor map — with
+an eleven-transcript table-driven test corpus plus RFC-vector base64 tests.
+
+**Deviations:** built **sans-I/O instead of trait-plus-scripted-fake**: the machine
+is a pure lines-in/lines-out function (`Machine::handle_line`) and the transcript
+tables are the scripted transport. The trait the order named was not built — the
+actor loop and transport seam move wholesale to prompt 5, which now carries the
+restated prompt-1 edge constraint. This is the strongest possible protocol/I-O
+separation, but it is a different architecture than ordered and is recorded here as
+such. Fail-closed SASL (`State::Failed` on 904/denial/not-offered when SASL is
+configured) is added behavior the order's "tolerate any subset being denied" did
+not carve out — NORTH-STAR §2.3's loud-opt-in-to-insecurity ethos decides it:
+silently proceeding unauthenticated after the user configured SASL is the trap.
+SASL is one explicit state, not per-mechanism states — with exactly one mechanism
+implemented, per-mechanism states would be untestable structure; the honest record
+is the stage-6 note that EXTERNAL requires mechanism iteration.
+
+**Deferred:** None.
+
+**Learned:** irc-proto 1.1 drags tokio/tokio-util/bytes into the tree transitively
+— the async runtime is in Cargo.lock two prompts before we use it; harmless but
+worth knowing when reading `cargo tree`. irc-proto's CAP variant packs the
+continuation marker and cap list into two trailing Options — the `(Some("*"),
+Some(caps))` shape is the multiline marker. And the reviewer caught a real §6.8
+violation: CAP NEW arriving mid-negotiation produced a REQ that did not gate CAP
+END — "every requested cap" has no timing exception; fixed with its transcript.
+
+**Measured:** 22 tests across the workspace; the machine + caps modules are 262 and
+280 lines against the 400-line ratchet.
+
+**Live run:** N/A — no I/O exists by design; prompt 5 is where this machine first
+touches a socket (the prompt block pre-declares this).
+
+**Review:** adopted — the CAP NEW mid-negotiation gate bug (fixed + transcript);
+the out-of-order transcript now runs through 001/376 and asserts it *ends
+registered*, matching the acceptance literally; `SaslCredentials` got a manual
+redacting `Debug` so the password cannot print through `{:?}` of a machine or an
+actor log (fixed now rather than deferred to prompt 10 — a known secret leak does
+not age well). Rejected: the missing irc-proto allowlist edit (irc-proto has been
+on `DEP_ALLOWLIST` since bootstrap; local + CI `make check` prove it); dropping
+nick tracking (ISUPPORT's "parsed into network state" covers nick state, and
+prompt 6's reconnect needs the confirmed nick).
+
+**Carry-forward consumed:** both prompt-4 notes — the trait-placement constraint
+(honored by placing the machine in havoc-core with no havoc-transport edge;
+restated onto prompt 5 with the deviation) and the ConnectionPhase projection
+(`Machine::phase()` maps ~8 real states onto the 3-variant wire enum; the real
+enum stays core-private).
+
+**Carry-forward raised:** six, all from the review harvest, all adopted: prompt 5
+(no actor/trait exists — build wholesale under the restated edge constraint;
+handle_line returns lines only — decide the event-surfacing shape), prompt 6
+(inline-Rust corpus vs fixture files — pick before capturing; phase() folds
+Failed/Disconnected — backoff must read state() and never retry Failed, no reset()
+path), prompt 7 (the machine discards non-protocol messages and parses inside
+handle_line — decide the parse-once seam), stage 6 item 2 (the mechanism slot is
+shape-only; EXTERNAL needs iteration + 908). Rejected from the harvest: the
+prompt-10 credentials-Debug note — fixed in this PR instead, moot.
+**Oversize:** 832 changed lines in crates/ against the 800 cap — 290 of them are
+the transcript test corpus, which the prompt names as "the deliverable as much as
+the code", and the split candidate (tests from machine) would sever the corpus
+from the rules it pins. The mechanical bulk is tables, reviewed line by line.
