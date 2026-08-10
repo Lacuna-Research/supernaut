@@ -832,3 +832,13 @@ amended to the four-loop reality), prompt 9 (commands dropped while disconnected
 have no signal), prompt 10 (env/flag installed base must be replaced, not
 extended), stage 5 item 2 (resync must be core-driven off the second
 Registered). Rejected from the harvest: none.
+
+Prompt 6 addendum 2 — a CI-only discipline failure surfaced a portability bug in
+check-docs.sh itself: pipe-fed `grep -q` exits at first match, and under
+`set -euo pipefail` GNU sed upstream dies of SIGPIPE, failing the pipeline
+*because* the match succeeded (BSD sed on the dogfood Mac never surfaced it —
+test-checks.sh's own expect() comment described this exact class). All eight
+pipe-fed `grep -q` sites now read to EOF (`grep ... >/dev/null`); file-arg greps
+keep `-q`. The fixture suite (38) covers the rules' semantics unchanged; the
+SIGPIPE trigger itself is GNU-environment-only and is proven by this PR's own CI
+run going green.
