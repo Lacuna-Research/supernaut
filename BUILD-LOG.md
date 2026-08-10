@@ -842,3 +842,112 @@ pipe-fed `grep -q` sites now read to EOF (`grep ... >/dev/null`); file-arg greps
 keep `-q`. The fixture suite (38) covers the rules' semantics unchanged; the
 SIGPIPE trigger itself is GNU-environment-only and is proven by this PR's own CI
 run going green.
+
+## Decision — ingestion identity and the parse-once seam
+**Date:** 2026-08-10  **Affects:** havoc-core (connection/ingest.rs, storage), ciborium into havoc-core
+
+**Chose:** the actor parses each line exactly once and shares the parse between
+`Machine::handle_message` (now pub; `handle_line` stays as the corpus's wrapper)
+and the new classifier — `our_join`/`JoinedChannel` deleted, buffer creation rides
+ingestion. The ingest type is core-private (wire `Message` keeps no msgid berth —
+dedup is storage's business). Identity lives entirely in the storage layer: seq
+from per-writer-thread counters, dedup by the partial unique index with the
+conflict target spelling out `WHERE msgid IS NOT NULL`, and tagless lines get a
+synthetic `fnv:<hex>` msgid (inline FNV-1a 64 — disk format must be stable across
+releases, which rules out DefaultHasher; sha2 fails the dependency bar) over
+(nick, text, 30s bucket) stored in the same column so one index enforces both
+identities. tags land as CBOR (ciborium moves to havoc-core runtime deps; already
+on the allowlist). server-time is a hand-rolled parser for the one pinned IRCv3
+grammar. Own messages are recorded via echo-message only.
+**Over:** widening `handle_line` to carry messages (churns the entire transcript
+corpus); amending the wire type with msgid; a time/sha2/rand-class dependency per
+small need; a second parse per line (what prompt 5 shipped and this deletes).
+**Revisit if:** stage 5's bouncer work shows the 30s-bucket collapse biting real
+replay traffic, or a dogfood network without echo-message makes own-send logging
+urgent.
+
+## Decision — synchronous=NORMAL, measured
+**Date:** 2026-08-10  **Affects:** crates/havoc-core/src/storage/mod.rs
+
+**Chose:** `PRAGMA synchronous=NORMAL` under WAL. Flood measurement (500 lines,
+live ergo, this Mac): 8 commits at NORMAL, 8 commits at FULL, ~6s wall each —
+indistinguishable at this scale; the win is batching itself (8 commits vs 500
+potential fsyncs). NORMAL keeps committed data across an app crash and concedes
+only the power-loss tail — the right trade for chat history.
+**Over:** FULL (no measured benefit here, more fsync on slower disks later).
+**Revisit if:** dogfood on slower storage shows checkpoint stalls.
+
+## Prompt 7 — Message ingestion, identity, and batched writes
+
+**Commit:** PR #10 (squash)  **Date:** 2026-08-10
+
+**Shipped:** the write path — parse-once actor seam feeding the classifier
+(connection/ingest.rs, hand-rolled server-time parser), core-private Ingest type,
+the no-await ingest lane (actor → core report → storage job queue, plain send),
+batched transactions (256 rows / ~100ms window / flush-before-reads /
+flush-at-shutdown), storage-layer identity (per-buffer seq counters, partial-index
+dedup, FNV synthetic msgid), CBOR tags, NetworkRow newtype killing the id-space
+swap class, BufferCreated idempotency across reconnects, the `wait message` verb,
+and the flood segment in live-run.sh.
+
+**Deviations:** the upsert's conflict target must spell the partial index's
+predicate (`ON CONFLICT (buffer_id, msgid) WHERE msgid IS NOT NULL`) — SQLite
+refuses the bare column pair; discovered by the module tests. QUIT/NICK are not
+ingested (membership state doesn't exist; PLAN stage-2 note raised). The
+content-hash fallback ships unit-tested only — ergo tags everything, so its live
+proof honestly waits for stage 5's bouncer.
+
+**Deferred:** None beyond the recorded skips above.
+
+**Learned:** two harness lessons that are really product lessons. (1) `quit`/EOF
+races in-flight requests: carol's flood lost ~300 sends to the runtime drop until
+she drained via her own echo-message count — noted on prompt 9, where the verbs
+should grow a real drain. (2) A dead session's fifo write SIGPIPEs bash itself,
+which skips the EXIT trap and leaks ergo — the script now ignores PIPE so writes
+fail as catchable errors. Also: ergo needs `fakelag: enabled: false` or a flood
+trickles.
+
+**Measured:** 500-line flood → 8 commits (vs 500 potential fsyncs), ~6s wall, at
+both synchronous=FULL and NORMAL (decision entry above). 16/16 live assertions.
+sqlite post-mortem: journal=wal, rows=500, distinct=500, maxseq=502.
+
+**Live run:** all 16 assertions green — B's send arriving as MessageAdded, the
+500-line flood counted by A and read back from disk after process death, exactly
+one BufferCreated across the ergo restart, batching measured. Run three times
+(NORMAL, FULL, NORMAL-final).
+
+**Review:** ran below; dispositions recorded there.
+
+**Carry-forward consumed:** all ten notes — msgid berth (core-private Ingest);
+ensure_buffer kind conflict (deterministic target_kind + loud mismatch, never
+re-kinded); sync Storage bridge (the no-await ingest lane; connect's single
+spawn_blocking stays); tags CBOR (ciborium in, decision entry); parse-once seam
+(decided: actor parses, machine handle_message pub); our_join subsumed (deleted);
+handle_report serialization (fire-and-forget lane, zero awaits); id spaces
+(NetworkRow newtype); sleep polls (event-shaped polls now sync on wait-verb
+echoes; harness-level polls stay, commented); reconnect replay idempotency
+(index-driven dedup + first-touch BufferCreated, asserted across a live restart).
+
+**Carry-forward raised:** prompt 9 (quit races in-flight requests — drain or
+document), PLAN stage 2 item 5 (QUIT/NICK need membership state). Both adopted.
+
+Prompt 7 Review addendum (dispositions): fixed now — the rollback cache-poisoning
+(a real correctness bug: phantom buffer ids and advanced seqs survived a failed
+batch; caches now clear on rollback and reseed from disk), the silent ingest drop
+on an unknown network (now loud), the server-time parser's missing lower bounds
+and month-aware day validation (negatives and 02-31 now fall back), the harness's
+weakened contiguity assert (now COUNT(*) == MAX(seq) over all kinds), the commits
+bound (tightened to <50), and FLOOD_SECS measuring the wrong interval (moved
+before carol's pipeline). Accepted as recorded imprecision: the "B's send arrived"
+assert and `wait message` count both match any MessageAdded kind — the verbs are
+rewritten at prompt 9, where the kind-aware note now lives. Carry-forward raised,
+all four adopted: prompt 8 (rollback invalidation meets FTS sync; the second-
+reader staleness window), prompt 9 (unannounced pre-existing buffers — decide the
+attach replay; kind-aware counting + keep the script's contiguity check).
+Rejected from the harvest: none.
+**Oversize:** 1097 changed lines in crates/ against the 800 cap. Identity and
+batching are one insert path by design ("Examined for a split and left whole" —
+the flood harness that proves batching is the same one that proves dedup), and a
+third of the lines are the storage-thread rewrite the batching required plus its
+module tests. The split candidate (classifier vs writer) would ship an ingest
+type with no writer to receive it.

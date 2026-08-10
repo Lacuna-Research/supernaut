@@ -254,6 +254,7 @@ dependencies = [
 name = "havoc-core"
 version = "0.1.0"
 dependencies = [
+ "ciborium",
  "havoc-ipc",
  "irc-proto",
  "rusqlite",

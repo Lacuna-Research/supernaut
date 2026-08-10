@@ -221,6 +221,14 @@ Covers NORTH-STAR §8 M3.
 5. **Input widget and command line.** Composer (client-authoritative while typing,
    §4.5), command parsing (`/join`, `/msg`, `/search`, …), input history from core,
    nick completion.
+
+   ### Carry-forward
+   - From stage 1 prompt 7: **QUIT and NICK are not ingested — they fan out to
+     every shared channel, which needs the membership state nick completion
+     builds here.** The classifier in
+     `crates/havoc-core/src/connection/ingest.rs` skips them deliberately;
+     when membership tracking lands, extend the classifier (and decide whether
+     to backfill or accept the gap in history).
 6. **Theme file and nick coloring.** Semantic slots, truecolor, data-file themes; ship
    two or three, one unapologetically loud (§5.8). Nick coloring on.
 7. **First-run experience.** Pick a network, type a nick, you are on IRC with TLS,

@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 6/10 complete. Next: prompt 7.
+**Status:** 7/10 complete. Next: prompt 8.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -620,85 +620,178 @@ registered over TLS with stock webpki roots (SASL ergo-only, honestly recorded).
 **Item:** Message ingestion, identity, and batched writes.
 **Branch:** `prompt-07-ingestion`
 
-The write path: actor events flow through the bus into the storage thread. `seq`
-assigned at insert and returned on the MessageAdded event; `msgid` dedup enforced by
-the unique index at the storage layer, not the application layer (§6.4); content-hash
-fallback over (nick, text, coarse time bucket) for tagless servers; batched
-transactions on a ~100ms/N-message timer with WAL verified (§6.5). The live run floods
-a channel via ergo and measures that writes batch instead of fsync-per-line.
+```
+The write path: after this prompt every line the actor sees on a live connection
+lands in SQLite exactly once — seq assigned at insert, msgid dedup enforced by
+the partial unique index, commits batched on a ~100ms/256-row window — and comes
+back out as a MessageAdded event a person watches in the debug CLI and a flood
+measures.
+
+Three places the notes and the item pull apart, surfaced rather than resolved
+silently:
+
+- The item's phrasing "actor events flow through the bus into the storage
+  thread" cannot be built literally. The broadcast bus is allowed to lag and
+  drop (loudly — that is its prompt-5 contract), and a lane that may drop can
+  never be the history write path. Ingest flows actor → core reports → storage
+  job queue; the bus carries only the post-insert MessageAdded. The sentence is
+  satisfied in effect — events reach storage, then every client — not in
+  topology.
+- The content-hash fallback is unobservable in this prompt's live run: ergo tags
+  every message with msgid, so the fallback ships proven by unit tests against
+  real temp-file SQLite only, and its live proof waits for stage 5's bouncer
+  work. Recording that honestly beats contriving a fake tagless server nothing
+  in the plan asked for.
+- The live-run note says the event-shaped polls "get deleted", but a
+  fifo-driven background session still needs one sync primitive the script can
+  see. Decided: what gets deleted is grepping for raw event patterns (the
+  PRIVMSG-in-trace loop and the registered-count loop); the script's remaining
+  loops sync only on the wait verbs' own `waited ...` echo lines — the pattern
+  the surviving `waited buffer` loop already set.
+
+The work:
+
+- Parse once, in the actor — the seam decision. Machine::handle_message gains
+  pub visibility; handle_line stays as the parse-then-delegate wrapper so the
+  transcript corpus in crates/havoc-core/tests/state_machine.rs is untouched.
+  The actor parses each inbound line exactly once (unparseable lines are traced
+  and skipped, preserving the machine's ignore rule), feeds the machine the
+  &Message, then feeds the same &Message to a new classifier in
+  crates/havoc-core/src/connection/ingest.rs. Delete our_join and
+  ActorReport::JoinedChannel outright: our confirmed JOIN now arrives as an
+  ingested Join message and buffer creation rides ingestion. The machine grows
+  no message output — widening handle_line's Vec<String> would churn the whole
+  corpus to buy what the actor's single parse already holds.
+- The ingest type is core-private: wire Message has no msgid berth (excluded
+  from tags and absent as a field, deliberately), and rows are core's business
+  per prompt 3's fence — do not amend havoc-ipc. `Ingest { target, kind, nick,
+  account, text, server_time, msgid: Option<String>, tags }`, built by the
+  classifier from the parsed message plus machine context (our nick). Kinds
+  ingested: Privmsg, Notice, Join, Part, Topic, Mode — everything addressed to
+  a named target. QUIT and NICK fan out to every shared channel, which needs
+  membership state no prompt has built: skipped, with a carry-forward to PLAN
+  stage 2, where nick completion needs the same tracking. Numerics stay
+  un-ingested; a server-console buffer would be new scope, not a silent kind.
+- server-time: a strict hand-rolled parser for the one grammar the IRCv3 spec
+  pins (`YYYY-MM-DDThh:mm:ss.sssZ`, days-from-civil arithmetic, unit-tested
+  against known vectors); anything else falls back to local receipt time. A
+  time dependency for one fixed format fails the same allowlist bar the jitter
+  rand did.
+- Identity, all of it enforced in the storage layer (§6.4): seq comes from a
+  per-buffer counter cached in the storage thread, seeded from MAX(seq) on
+  first touch — sound because that thread is the only writer — and incremented
+  only when a row actually inserts, so per-buffer seq is contiguous and the
+  flood can assert COUNT(*) == MAX(seq). Dedup is INSERT ... ON CONFLICT
+  (buffer_id, msgid) DO NOTHING with the changed-row count deciding everything
+  downstream: 0 changed → no seq consumed, no event emitted. MessageAdded
+  idempotency across reconnect replays is thereby a consequence of the index,
+  never an application-layer memory. Tagless messages get a synthetic msgid
+  `fnv:<hex>` — FNV-1a 64 written inline (ten lines; sha2 fails the dependency
+  bar, and std's DefaultHasher is unstable across releases where this value is
+  disk format) over (nick, text, server_time / 30_000) — stored in the same
+  msgid column so the one partial index enforces both identities. The cost is
+  accepted and unit-tested: identical (nick, text) inside one 30s bucket on a
+  tagless server collapses to one row — §6.5's replay-safety trade; stage 5
+  revisits it against a real bouncer.
+- tags land as the CBOR the schema already promises: ciborium becomes a runtime
+  dependency of havoc-core (already on DEP_ALLOWLIST; the crate move still gets
+  its decision entry). An empty map stores NULL so "no tags" stays queryable.
+- The lane, resolving both decoupling notes: ActorReport gains Message(Ingest);
+  handle_report maps the caller NetworkId to its row id and forwards with a
+  plain non-blocking send into the storage job queue — zero awaits on the
+  ingest path, so the flood can no longer serialize through the core select
+  loop. Job::Ingest { network (caller id, echoed through untouched), row, item,
+  outcome } is fire-and-forget; the std mpsc is unbounded, deliberately —
+  history is never dropped for backpressure, and bounded-queue design waits for
+  dogfood evidence. `NetworkRow` is a new core-private newtype returned by
+  ensure_network, so the two-id-spaces-both-equal-1 accident class dies at
+  compile time; wire BufferIds are storage rows by design and stand.
+- Batching, in the storage thread's run loop (crates/havoc-core/src/storage/):
+  pending rows flush as one transaction at 256 rows, at ~100ms after the first
+  pending row (recv_timeout against the deadline), when any non-ingest job
+  arrives (reads must see writes), and at Shutdown — queue order puts pending
+  ingests ahead of the Shutdown job, so quit loses nothing. Inside the
+  transaction the thread ensures the buffer itself (it owns the connection;
+  kind derives from the target's leading #/& → channel, else query —
+  deterministic per name, so ensure_buffer's ON CONFLICT DO NOTHING can never
+  silently re-kind a buffer from this path; kind is immutable after creation
+  and a mismatch is reported loudly, never swallowed), assigns seqs, inserts,
+  then sends one IngestOutcome back on the tokio sender the job carried
+  (blocking_send is fine from a std thread): created buffers first, then
+  inserted rows with their seqs.
+- Core, on outcome: update the id/name maps, emit BufferCreated only on first
+  touch per core instance — across an ergo restart the replayed autojoin
+  re-ensures the same row and emits nothing, which is exactly the idempotency
+  the reconnect note demands — then MessageAdded per inserted row, in order.
+- Own messages are recorded via echo-message only (requested since prompt 4;
+  ergo and Libera grant it): one identity source, dedup-safe by msgid. Servers
+  without echo-message will not log own sends yet — a known limitation recorded
+  in BUILD-LOG; dogfood decides whether it earns work.
+- PRAGMA synchronous belongs to this flood harness: run the flood at the
+  default (FULL) and at NORMAL, record both numbers in the BUILD-LOG entry, and
+  ship `synchronous=NORMAL` in Storage::open unless the numbers argue otherwise
+  — in WAL, NORMAL fsyncs at checkpoint rather than per commit, keeps committed
+  data across an app crash, and concedes only the power-loss tail, the right
+  side of the trade for chat history. Storage::open grows a trace flag (the
+  session passes --trace-irc's value through) and the thread prints one
+  `storage commit rows=N` line per batch to stderr — measurement is grep, not a
+  logging framework; the two-eprintln stance stands.
+- CLI, crates/supernaut/src/session.rs: `wait message <buffer> [count] [secs]`
+  (count defaults to 1), counting MessageAdded per BufferId through the same
+  name→id projection the other verbs use; a timeout still names its deadline
+  and exits non-zero.
+- scripts/live-run.sh: delete the a.trace PRIVMSG poll and the
+  registered-count poll. After B runs, A's fifo gets `wait message #supernaut
+  1 10`; after the restart the script syncs on the second `waited registered`
+  echo. New flood segment before the restart: a third scripted session (carol)
+  — connect, join #flood, then 500 numbered `send` lines piped upfront,
+  sleep-free by construction because the session processes commands serially.
+  A joins #flood first and runs `wait message #flood 500 60`. The
+  harness-level loops (ergo listening, raw-nc pre-registration) stay, honestly
+  commented as outside any session.
+
+Acceptance: run scripts/live-run.sh and watch B's line arrive at A as `event
+message-added` rather than only in the raw trace; watch the flood — 500 sends
+from carol, A's `waited message #flood`, and a `storage commit rows=N` count in
+A's stderr well under a tenth of 500 (record the number, and the FULL/NORMAL
+pair, in BUILD-LOG); watch ergo die and restart with exactly one
+`event buffer-created ... name=#supernaut` across both registrations. After the
+script quits the sessions, run sqlite3 against A's data dir and read
+journal_mode wal, COUNT(*) equal to MAX(seq) for #flood, and each flood line
+present exactly once — kill-and-lose-nothing observed from outside the process.
+cargo test --workspace green, including: same msgid twice → one row and one
+MessageAdded; a tagless (nick, text, bucket) pair → one row; the server-time
+parser vectors; and the transcript corpus untouched. make check green.
+
+Do not: FTS indexing or sync (prompt 8 — external-content against WITHOUT
+ROWID is a schema question already noted there, and deciding it under flood
+pressure is how it goes wrong); backlog reads or read markers (prompt 9 — the
+read path deserves its own session against a populated store); replay/resync
+scenarios beyond what ergo produces today, including CHATHISTORY (stage 5 — a
+real bouncer is the only honest test); QUIT/NICK fan-out or membership
+tracking (carry-forward to PLAN stage 2, where nick completion needs the same
+state); a server-console buffer for numerics (new scope — a PLAN item if ever,
+not a silent ingest kind); an async facade over StorageClient (the ingest lane
+is the only bridge added here; connect's single spawn_blocking site stays —
+one site is not three); any new dependency beyond ciborium (no sha2 for one
+hash, no time for one fixed grammar, no rand — the jitter set the bar); and no
+wire changes — Message and MessageAdded stand as shipped, msgid stays off the
+wire because dedup is storage's business, and PROTOCOL_VERSION stays 1.
+```
 
 **Examined for a split (identity vs batching) and left whole**, because both are the
 single insert path, and the flood harness that proves batching is the same one that
 proves dedup. Revisit if the content-hash fallback design stalls the session — it can
 trail as its own small prompt.
 
-Do not: FTS indexing (prompt 8), backlog reads (prompt 9), or replay/resync dedup
-scenarios beyond what ergo can produce today (stage 5 tests against a real bouncer).
-
-*To be written out before it starts.*
-
-### Carry-forward
-
-- From prompt 2: **`msgid` has no berth on the wire `Message`.** The `tags` doc in
-  `crates/havoc-ipc/src/lib.rs` excludes msgid as "lifted into fields", but
-  `Message` has no msgid field — excluded from tags *and* absent. The
-  actor→storage ingest path therefore cannot ride `havoc_ipc::Message`; dedup
-  needs msgid at insert. Plan a core-internal ingest type (rows are core's private
-  business per prompt 3's fence) or amend the wire type and its doc — decide in
-  the prompt text, not mid-session.
-- From prompt 3: **`ensure_buffer` silently discards `kind` on conflict.** In
-  `crates/havoc-core/src/storage/mod.rs` it does `ON CONFLICT ... DO NOTHING`
-  then selects the existing id — a buffer first created as `query` stays `query`
-  even when later ensured as `channel`, with no error. Ingest creates buffers
-  from live traffic: define re-kind semantics in the prompt or forbid ingestion
-  from using this helper.
-- From prompt 3: **the `Storage` handle is synchronous — every method parks the
-  calling thread.** All methods block on `std::sync::mpsc` `recv()`; actors are
-  tokio tasks, and calling this inline from one stalls the executor. Decide the
-  bridge (async facade over the job channel, or `spawn_blocking`) in the prompt
-  text, not when the flood test hangs. Also: the flood harness owns `PRAGMA
-  synchronous` tuning — `Storage::open` deliberately leaves it at the default.
-- From prompt 5: **the parse-twice outcome already shipped — `our_join` is the
-  first thing the parse-once decision must consume.** `our_join` in
-  `crates/havoc-core/src/connection/actor.rs` re-parses every inbound line to
-  spot the confirmed self-JOIN. Whichever seam this prompt picks, it must delete
-  or subsume `our_join` and the `ActorReport::JoinedChannel` path — otherwise
-  ingestion adds a third parse.
-- From prompt 5: **`handle_report` awaits storage inline in the core select
-  loop — the flood will serialize through it.** `run()` in
-  `crates/havoc-core/src/core.rs` processes one report at a time and awaits a
-  `spawn_blocking` round-trip per event. Batching must decouple report intake
-  from storage completion, not merely batch inside the storage thread.
-- From prompt 5: **two id spaces share one type, and in every live run both
-  equal 1.** `network_rows` in `crates/havoc-core/src/core.rs` maps caller
-  wire ids to storage row ids — same `NetworkId` type both sides — while wire
-  `BufferId`s ARE storage rows. Ingest writes must go through the mapping;
-  consider a core-private row-id newtype before the write path lands.
-- From prompt 5 (amended at 6): **the sleep polls in live-run.sh are waiting
-  for your event — but only some can become `wait` verbs.** Prompt 6 grew the
-  script to four poll loops. Event-shaped ones (B's PRIVMSG landing, the second
-  `phase=registered`) become `wait message`-class verbs and get deleted;
-  harness-level ones (ergo listening, raw-nc pre-registration) are outside any
-  session and stay, honestly commented.
-- From prompt 6: **every reconnect replays the registration side-effect
-  stream.** The attempt loop in `crates/havoc-core/src/connection/actor.rs`
-  builds a fresh Machine per attempt, so phase reports, autojoin, and
-  JoinedChannel re-fire across a restart. The ingest/buffer path must be
-  idempotent across attempts (ensure_buffer's conflict semantics are already
-  flagged above), or a flood test that includes a restart double-creates.
-- From prompt 4: **the machine parses and then discards every non-protocol
-  message — ingestion cannot tap it.** `handle_message` in
-  `crates/havoc-core/src/connection/mod.rs` drops PRIVMSG/NOTICE/JOIN, and the
-  parse happens inside `handle_line`, so the actor cannot reach the parsed
-  `irc_proto::Message` (tags included) without parsing twice. Decide in the
-  prompt text whether the actor parses once and feeds the machine a `&Message`,
-  or the machine grows a message output — either restructures the prompt-4 API,
-  and the seam choice may pull forward into prompt 5's actor design.
-- From prompt 3: **`message.tags` is declared CBOR on disk, but havoc-core has no
-  CBOR dependency.** `crates/havoc-core/migrations/0001_init.sql` commits the
-  column; ciborium is only havoc-ipc's dev-dep. Writing tags means a runtime
-  ciborium dependency in havoc-core — decision entry + it is already on the
-  global allowlist — so budget it into the prompt.
+**Status:** complete. Shipped per the JIT detail with recorded deviations: the ON
+CONFLICT target needed the partial index's WHERE clause spelled out; the harness
+taught two real lessons — a session's `quit` races in-flight requests (carol lost
+~300 sends to the runtime drop until she drained via her own echo count; noted on
+prompt 9), and a dead session's fifo SIGPIPEs the whole script unless the script
+ignores PIPE (bash skips the EXIT trap on signal death, leaking ergo). Flood: 500
+lines → 8 commits at both FULL and NORMAL (~6s wall each); NORMAL shipped per the
+a-priori argument, numbers recorded. All 16 live assertions green.
 
 ---
 
@@ -731,6 +824,17 @@ ranking work beyond FTS5 defaults.
   (core parses `from:`/`in:`) and no search variant on `ResponseBody`. Structured
   filter fields or a synchronous results response are wire changes — design the
   filter grammar as core-side parsing of a plain string with no wire cooperation.
+- From prompt 7: **a failed batch used to poison the writer caches; FTS sync is
+  the first realistic new error source in that transaction.** `write_batch` in
+  `crates/havoc-core/src/storage/exec.rs` now clears `WriterState.buffers` and
+  `next_seq` on rollback — the FTS-sync writes this prompt adds join exactly
+  that transaction, so its error story must keep the invalidation correct (and
+  test a mid-batch failure).
+- From prompt 7: **flush-before-reads guards only the storage thread's own job
+  queue.** A second read-only WAL connection (the option weighed below for
+  search) bypasses the flush barrier and can read up to 256 rows / ~100ms
+  stale — choosing it silently forfeits read-your-writes. Either search rides
+  the job queue, or the prompt accepts and documents the staleness window.
 - From prompt 5: **request dispatch discards the `ClientId` before the handler
   runs.** `handle_request` in `crates/havoc-core/src/core.rs` receives neither
   the client id nor the bus; SearchResults must go out `Bus::direct(client, ..)`

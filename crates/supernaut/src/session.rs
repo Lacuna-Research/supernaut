@@ -99,8 +99,8 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
         None => crate::default_data_dir()?,
     };
     std::fs::create_dir_all(&data_dir).map_err(|e| format!("data dir: {e}"))?;
-    let (storage, _report) =
-        Storage::open(&data_dir.join("history.db")).map_err(|e| format!("storage: {e}"))?;
+    let (storage, _report) = Storage::open(&data_dir.join("history.db"), args.trace_irc)
+        .map_err(|e| format!("storage: {e}"))?;
 
     let settings = NetworkSettings {
         name: format!("debug-{}", args.host),
@@ -132,6 +132,7 @@ struct SessionState {
     transport: InProcess,
     next_request: u64,
     buffers: HashMap<String, BufferId>,
+    msg_counts: HashMap<BufferId, u64>,
     phase: Option<ConnectionPhase>,
 }
 
@@ -140,6 +141,7 @@ async fn drive(transport: InProcess) -> Result<(), String> {
         transport,
         next_request: 1,
         buffers: HashMap::new(),
+        msg_counts: HashMap::new(),
         phase: None,
     };
 
@@ -206,14 +208,28 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
             Ok(true)
         }
         Some("wait") => {
-            let target = parts.next().unwrap_or("");
-            let name = parts.next().map(str::to_owned);
-            let secs: u64 = name
-                .as_deref()
-                .and_then(|n| n.parse().ok())
-                .or_else(|| parts.next().and_then(|s| s.parse().ok()))
-                .unwrap_or(10);
-            wait(state, target, name, secs).await?;
+            // registered [secs] | buffer <name> [secs] | message <name> [count] [secs]
+            let target = parts.next().unwrap_or("").to_owned();
+            let rest: Vec<&str> = parts.collect();
+            let (name, count, secs) = match target.as_str() {
+                "registered" => (
+                    None,
+                    1,
+                    rest.first().and_then(|s| s.parse().ok()).unwrap_or(10),
+                ),
+                "buffer" => (
+                    rest.first().map(|s| (*s).to_owned()),
+                    1,
+                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(10),
+                ),
+                "message" => (
+                    rest.first().map(|s| (*s).to_owned()),
+                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1),
+                    rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(10),
+                ),
+                _ => (None, 1, 10),
+            };
+            wait(state, &target, name, count, secs).await?;
             Ok(true)
         }
         Some(other) => {
@@ -233,12 +249,13 @@ async fn request(state: &mut SessionState, body: RequestBody) -> Result<(), Stri
         .map_err(|e| format!("send: {e}"))
 }
 
-/// `wait registered [secs]` / `wait buffer <name> [secs]`: consume (and still
-/// print) events until the predicate holds or the deadline names itself.
+/// `wait registered|buffer|message ...`: consume (and still print) events
+/// until the predicate holds or the deadline names itself.
 async fn wait(
     state: &mut SessionState,
     target: &str,
     name: Option<String>,
+    count: u64,
     secs: u64,
 ) -> Result<(), String> {
     let satisfied = |state: &SessionState| match target {
@@ -246,10 +263,16 @@ async fn wait(
         "buffer" => name
             .as_deref()
             .is_some_and(|n| state.buffers.contains_key(n)),
+        "message" => name.as_deref().is_some_and(|n| {
+            state
+                .buffers
+                .get(n)
+                .is_some_and(|id| state.msg_counts.get(id).copied().unwrap_or(0) >= count)
+        }),
         _ => true,
     };
-    if !matches!(target, "registered" | "buffer") {
-        println!("error - wait knows 'registered' and 'buffer'");
+    if !matches!(target, "registered" | "buffer" | "message") {
+        println!("error - wait knows 'registered', 'buffer', and 'message'");
         return Ok(());
     }
 
@@ -332,6 +355,7 @@ fn print_event(state: &mut SessionState, event: &Event) {
             );
         }
         Event::MessageAdded { message } => {
+            *state.msg_counts.entry(message.buffer).or_default() += 1;
             println!(
                 "event message-added buffer={} seq={}",
                 message.buffer.0, message.seq.0

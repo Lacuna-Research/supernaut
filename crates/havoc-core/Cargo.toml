@@ -8,6 +8,7 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+ciborium = "0.2.2"
 havoc-ipc.workspace = true
 irc-proto = "1.1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }

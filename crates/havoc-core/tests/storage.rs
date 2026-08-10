@@ -47,7 +47,7 @@ mod tempdir {
 fn migrations_create_then_noop() {
     let (_dir, path) = temp_db();
 
-    let (storage, report) = Storage::open(&path).expect("first open");
+    let (storage, report) = Storage::open(&path, false).expect("first open");
     assert_eq!(
         report,
         MigrationReport {
@@ -59,7 +59,7 @@ fn migrations_create_then_noop() {
     assert_eq!(storage.client().schema_version().expect("version"), 1);
     drop(storage);
 
-    let (storage, report) = Storage::open(&path).expect("second open");
+    let (storage, report) = Storage::open(&path, false).expect("second open");
     assert_eq!(report.applied(), 0, "reopening must be a no-op");
     assert_eq!(storage.client().schema_version().expect("version"), 1);
 }
@@ -68,7 +68,7 @@ fn migrations_create_then_noop() {
 #[test]
 fn schema_matches_north_star() {
     let (_dir, path) = temp_db();
-    let (storage, _) = Storage::open(&path).expect("open");
+    let (storage, _) = Storage::open(&path, false).expect("open");
     drop(storage); // release the write lock before inspecting
 
     let conn = rusqlite::Connection::open(&path).expect("inspect");
@@ -133,7 +133,7 @@ fn schema_matches_north_star() {
 #[test]
 fn ensure_calls_are_idempotent_through_the_channel() {
     let (_dir, path) = temp_db();
-    let (storage, _) = Storage::open(&path).expect("open");
+    let (storage, _) = Storage::open(&path, false).expect("open");
 
     let client = storage.client();
     let network = client.ensure_network("libera").expect("network");
