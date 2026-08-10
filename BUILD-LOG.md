@@ -1140,3 +1140,256 @@ checks and runs only on this Mac (pinned ergo, macos-arm64).
 - The reviewer/JIT sub-agent flow is fully specified in SUBAGENT-BRIEFS.md and
   the diff-capture convention (`git diff --cached --output=target/promptN.diff`)
   needs no session memory — noted here only to say so.
+
+## Decision — the buffer set is announced at attach, never requested
+**Date:** 2026-08-10  **Affects:** core.rs (attach arm, `announce`), storage `Job::ListBuffers`/`BufferRow`
+
+**Chose:** on attach, core enqueues `Job::ListBuffers`, resolves each row's
+network *name* back to the caller's `NetworkId` through `state.settings`, seeds
+`state.buffers`, and replays one `Event::BufferCreated` per resolved buffer down
+that one session's directed lane. Buffers on a network absent from config are
+skipped. `RequestBody` grows nothing, so §4.7's "there is no give-me-the-buffer
+request, ever" is not approached: enumerating buffers is §4.5's attach contract
+in as many words, the set is bounded by human action rather than traffic, and it
+carries no message text. `BufferCreated`'s meaning is restated — "this buffer
+exists and you did not know it" — because renaming the variant is itself a wire
+break.
+**Over:** a `RequestBody::ListBuffers` (the fence, and it is the exact request
+§4.7 names); a new `Event::BufferList` batching the replay (unknown *fields* are
+serde-tolerant on this wire, unknown *variants* are not — a real v1 break bought
+for a payload shape that already exists); broadcasting the replay (it would
+announce one client's history to every other attached client).
+**Revisit if:** stage 4's capability handshake makes variant additions
+negotiable — that is when batching the replay into one message becomes free — or
+if a client is ever seen swamped by a large replay.
+
+## Decision — read answers are dropped, not awaited: `Bus::try_direct`
+**Date:** 2026-08-10  **Affects:** bus.rs, core.rs `handle_read_outcome`
+
+**Chose:** a second, non-blocking directed primitive. `Bus::try_direct` returns
+`false` and removes the lane on `Closed` (an ordinary detach, silent) or on
+`Full` (after one loud line naming the `ClientId`). Backlog responses go out
+this way. The asymmetry with the write path, stated: writes are buffered without
+bound because a lost line is unrecoverable; reads are dropped because a read is
+by definition re-askable, and the engine must never hold history behind a reader
+that has ignored 64 answers and asked for a 65th. `Bus::direct` is unchanged,
+and search's ordered Response-then-Event pair still rides it.
+**Over:** awaiting `direct` for reads (one wedged reader stalls the select loop
+and, behind it, the storage thread's `blocking_send` — the prompt-8
+carry-forward); unbounding the directed lane (a read is not history); a bigger
+bounded cap (moves the threshold instead of removing the coupling); converting
+search's pair too — "what does half a delivered pair mean" is a real question
+and it belongs to 9b's verb/drain seam, not here.
+**Revisit if:** 9b converts the search pair, or dogfood shows a legitimate
+client tripping the 64-slot drop.
+
+## Prompt 9a — Windowed backlog
+
+**Commit:** branch `prompt-09a-backlog` (PR open)  **Date:** 2026-08-10
+
+**Shipped:** `FetchBacklog` for real, all four anchors, always ascending by seq.
+`run_backlog` + `BACKLOG_MAX_LIMIT = 200` + a shared row-hydration fn in
+storage/query.rs; two fire-and-forget read jobs (`Job::Backlog`,
+`Job::ListBuffers`) behind the existing flush-before-non-ingest barrier,
+answering on one new bounded (64) `reads_tx` as `ReadOutcome::{Backlog,
+Buffers}`; `BufferRow` carrying the network *name* so storage never mints a wire
+id; the `FetchBacklog` arm mirroring Search including the immediate
+`Error("storage unavailable: …")` on a failed enqueue; attach-time buffer
+announcement with network-name resolution, `state.buffers` seeding, and delivery
+by a short-lived task holding a `Bus::lane` clone; `Bus::try_direct`; the CLI
+`backlog <buffer> <latest|before:|after:|around:|around-hit> [limit]` verb,
+`wait backlog` counting responses, and `backlog request=/line …` printing in the
+new crates/supernaut/src/session_backlog.rs; two new live-run segments. No wire
+change: `PROTOCOL_VERSION` stays 1, no variant added, no `RequestBody` addition.
+Both decisions above were made in the prompt text and are recorded there too.
+
+**Deviations:** two, both small. (1) The implementer's warning that
+`crates/havoc-core/tests/core_search.rs` would need to skip replay events did
+not bite — that test spawns core with an empty settings map, so every seeded
+buffer's network is unresolvable and nothing is announced. The test passes
+untouched; the skip would have been dead code. (2) `parse_kind` (exec.rs) became
+`pub(super)` so `run_list_buffers` could reuse it rather than fork a second
+string→`BufferKind` mapping; the detail named only message-row hydration as
+shared, and `parse_kind` then moved again in the split below. Also,
+`handle_outcome`'s inline wire-Message construction now calls the same private
+`wire()` helper the backlog and search paths use — a strict simplification, not
+a behaviour change.
+
+**Deviation: four file splits the detail did not foresee.** It predicted pressure
+on session.rs alone (handled as ordered, by session_backlog.rs), but the
+longest-file ratchet caught four files over 400 at first `make check`: core.rs
+464, storage/tests.rs 462, storage/mod.rs 419, storage/exec.rs 419. Split along
+seams rather than by cutting anything, and each new file says why in its header:
+`crates/havoc-core/src/core/reads.rs` (the read path's whole delivery story —
+search's ordered `direct` pair and a window's `try_direct`, next to each other on
+purpose); `crates/havoc-core/src/storage/identity.rs` (the parts of storage that
+**are** disk format — the two enums' column encodings plus the synthetic-msgid
+hash — so the "changing this rewrites history already written" rule has one home
+instead of three, which also gave `parse_kind` a better home than exec.rs); and
+`crates/havoc-core/src/storage/tests/backlog.rs`. Longest file is now 375
+(session.rs and storage/mod.rs tie). The ratchet's standing invitation to tighten
+the ceiling to the new value is **declined here, deliberately**: 375 is exactly
+session.rs, which is prompt 9b's own working file, so tightening now would fail
+9b's first commit for a reason unrelated to 9b.
+
+**Deferred:** nothing from this prompt's scope. Converting search's
+Response-then-Event pair to `try_direct`, and `wait search`'s event-counting
+blindness, remain 9b's (both were named in the prompt text as such and are
+carried forward below).
+
+**Learned:** the empty-settings escape hatch above is worth remembering — the
+attach replay is silent in every test that does not configure a network, which
+is why eleven prompts of dispatch tests needed no edits. `Anchor::AroundSearchHit`
+over a *deleted* seq needed a second SQLite connection to test at all: the write
+path is append-only by design, so the only way to punch the gap retention will
+one day punch was to open the file again and `DELETE` (the storage thread was
+idle; WAL made it uneventful). The centred-window arithmetic is the part worth
+having pinned by test: `before = (n-1)/2`, `after = (n-1)-before`, descending
+scan inclusive of the anchor — three assertions (middle, first row, last row)
+were enough to catch getting it off by one.
+
+**Measured:** the whole backlog segment — a 5-row window, a 9999-asked/200-served
+window, and a 7-row centred window over a 502-row buffer — is 0s at the
+harness's 1s granularity, as search is; `storage backlog buffer=N rows=K` under
+`--trace-irc` is where a real number would come from if one is ever needed. 35
+live assertions (up from 24). session.rs 375/400 against the longest-file
+ratchet, which is what the new session_backlog.rs bought; three further files
+needed the same treatment (see the deviation above). 50 workspace tests, 9 of
+them new (5 storage anchors/cap/errors, 2 core attach-replay, 2 bus
+try_direct).
+
+**Live run:** `scripts/live-run.sh`, 35/35 green on the first attempt after
+implementation, no retries. The two new segments, observed: A printed
+`backlog request=… count=5` with `seq=1` first for `after:0 5`; `latest 9999`
+came back `count=200` — the engine refusing the number it was handed, seen from
+outside; `around-hit 7` centred on `flood line 250` with 247 and 253 present,
+which is jump-to-context working headless off the search hit the session had
+actually seen. Then session D — a process that issues no `connect` at all — over
+A's closed data dir: `waited buffer #supernaut` from the attach replay alone,
+`line … text=the deployment failed` read back out of history a *different*
+process wrote, and no `event connection-state` line anywhere in its output.
+
+**Review:** pending
+
+**Carry-forward consumed:** all four notes on prompt 9a, deleted from
+STAGE-1-PROMPTS.md in this change. (1) *Don't copy search's swallowed enqueue
+failure* — the `FetchBacklog` arm returns an immediate
+`Error("storage unavailable: {e}")`, and it was written that way from the first
+line, not retrofitted. (2) *The bounded-lane-behind-blocking-send topology, and
+the read-side backpressure story* — decided as `Bus::try_direct` with the
+never-block-history asymmetry inverted for reads (decision entry above); the
+storage thread can no longer be stalled behind a wedged reader on the backlog
+path. (3) *`wait search` counts success events only* — the `backlog` verb counts
+**responses** instead (`backlog_pending: HashSet<RequestId>`, incremented by
+both `Backlog` and `Error`), so a failed window ends the wait with a printed
+error rather than a timeout with nothing to read; `wait search` itself is
+deliberately left alone as 9b's. (4) *A buffer that predates the core instance
+is never announced* — settled by making the buffer set something the core
+announces at attach rather than something a client can ask for, proven live by
+session D.
+
+**Carry-forward raised:** see Review.
+
+**Oversize:** 1420 changed lines in crates/ against the 800 cap — 1099 before the
+four ratchet-forced file splits above, which are pure moves and account for the
+other 321. The detail predicted staying inside the cap and named the remedy —
+trail the storage-level edge-case anchors into 9b — so this was measured against
+that remedy rather than waved through, and the remedy does not close the gap: at
+1099 the **non-test** code was 725 lines on its own (query.rs 193/37 largely the
+shared hydration refactor, the core diff the announcement seam, bus.rs 76 for
+`try_direct` and its two tests), and dropping every storage edge-case anchor
+named as tradeable removes ~130, landing at ~969. Deleting verified tests to buy
+~130 lines against a cap the non-test code already exceeds is a worse trade than
+saying so here. Examined for a split and left whole for the reason the 9a/9b
+split already recorded: the window and the announcement are one read-path seam —
+the announcement exists so that a window can be *asked for* over a data dir this
+process did not write, and the live proof of one is the live proof of the other.
+382 of the lines are tests, all ordered by the prompt. The live run was never a
+candidate for trimming.
+
+## Prompt 9a — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 9a entry above; PR #14, second commit
+
+Appended rather than edited into that entry, deliberately: the entry is already
+committed and pushed, so revising it in place trips `log-append-only` on the
+staged diff — and "correct in a new entry" is what the rule asks for. Prompt 8's
+review addendum set the same shape.
+
+**Shipped:** five fixes from the review. (1) The one flatly-unmet order
+requirement: `Event::BufferCreated` now carries the doc comment stating its
+announced meaning — "this buffer exists and you did not know it", fires on
+creation *and* on attach-time replay, receivers must treat it as idempotent.
+Reusing the variant was always going to restate its meaning, and the reason for
+not renaming it is that a rename is a wire break; leaving the restatement
+undocumented would have made the decision unfindable from the type. Doc-only, so
+still no wire change. (2) `run_search` restated the column list by hand while
+`MESSAGE_COLUMNS`' comment claimed every message-row read shared it — it now
+interpolates the constant (qualified with the join's alias via
+`message_columns_as`), so a reorder cannot silently desynchronize the positional
+`hydrate`; and the comment claiming `run_backlog` is "the single site that binds
+the SQL LIMIT" now says what is true — `scan` binds it, `run_backlog` caps the
+number handed to it. (3) `last_hits` inserted in *rank* order, so it held the
+last-by-relevance hit while two comments claimed newest; it now keeps the
+greatest seq per buffer, which makes the comments true and `around-hit` mean what
+it says. Uncleared by design: across searches, the newest hit ever seen for a
+buffer wins. (4) The gap test's second connection sets `busy_timeout` (5s) before
+its DELETE, so future batch-timer work cannot make it flaky. (5) The 247/253 live
+assertions are kept — they are what proves centring — with the arithmetic written
+above them (the hit is at seq 252 because two join rows precede the flood; limit 7
+splits 3/3), so anyone who changes #flood's traffic diagnoses the failure instead
+of doubting the feature. Plus eleven carry-forward notes landed (below). The
+entry's `**Oversize:**` figures become 1456 changed lines in crates/, 391 of them
+tests, with these fixes.
+
+**Learned:** the `last_hits` bug is the useful one — the code was defensible and
+the *comment* was the defect, twice, which is the failure mode a reviewer catches
+and a test never would (any single-hit search passes either way; the live run's
+`around-hit` worked because `in:#flood "flood line 250"` returns exactly one hit).
+Also mechanical, and worth not relearning: **splitting a prompt's work across two
+local commits makes `make check` fail on the second one.** The pre-commit hook
+compares staged-vs-HEAD, so an in-place edit to a build-log entry that is already
+committed reads as a rewrite, and the entry's Shipped/Learned/Live-run sections
+are no longer in the *added* lines. CI compares against the base ref and is green
+either way. Two honest routes exist — squash the branch to one commit, or append
+an addendum as here — and force-pushing a PR branch is not always available.
+
+**Live run:** `scripts/live-run.sh` re-run after these fixes, since two of them
+are on live paths (`last_hits` and `run_search`'s SQL): **35/35, exit 0** — the
+third green run of this prompt.
+
+**Review:** the review's highest finding is **deferred to 9b by design**: the
+announcement task and `try_direct` contend for the same 64-slot lane while
+`handle_search_outcome` still awaits `bus.direct`, so a client that awaits a
+Response without draining events can be deadlocked by a replay it never asked
+for, and a task parked on a wedged lane makes the Full-drop outcome
+nondeterministic (zombie vs loud-kill). That is exactly the conversion this
+prompt's text named as 9b's, for the reason it gave — "what does half a delivered
+pair mean" has to be answered before search's ordered pair moves off `direct` —
+and answering it here would have been the second seam the 9a/9b split exists to
+avoid. It goes to 9b with the >64-buffer attach named as its test. The ungated
+`FetchBacklog` (a client can read, and enumerate by probing ids, buffers the
+announcement deliberately withheld — the skip is advisory, not a boundary) is
+harmless under single-user filesystem auth and becomes a real question when the
+socket makes clients plural, so it is a stage-4 note. Two liberties are
+**accepted as they stand**: `Anchor::Latest` binding `seq <= i64::MAX` as a
+sentinel rather than branching the SQL (one parameter shape for all four anchors
+is worth more than the purity), and the CLI's optional anchor with a default
+`limit` of 50 (a debug-harness convenience the wire never sees). Nothing else was
+left unaddressed.
+
+**Carry-forward raised:** eleven proposals from the harvest, all adopted, none
+rejected — four to prompt 9b (the replay/`try_direct` lane collision and search's
+await; `wait search` converting to the response-counting pattern rather than
+growing a parallel one; live-run's session-D window being anchored before
+#supernaut gains traffic; the stale "SetReadMarker arrives in prompt 9" string),
+two to prompt 10a (network `name` uniqueness becoming a validated config
+invariant rather than an assumption inside `announce`; session D's `--host`
+coupling switching to config in the same commit), three to PLAN stage 4
+(`FetchBacklog`'s lost exactly-one-Response guarantee needing a wire story; the
+advisory skip; `BACKLOG_MAX_LIMIT` being deliberately undiscoverable and owed by
+the handshake as a negotiated *value*), one to PLAN stage 2 (a `Backlog` response
+can name a buffer before its `BufferCreated` arrives — the mirror of the existing
+ordering note), and one to PLAN stage 6 (`last_read_seq` is already a *read*-path
+value handed to every attaching client, so per-client markers change
+`run_list_buffers` too).

@@ -15,10 +15,11 @@ use std::time::{Duration, Instant};
 use havoc_ipc::{BufferId, BufferKind, NetworkId, Seq};
 use rusqlite::Connection;
 
-use super::query::run_search;
+use super::identity::{parse_kind, synthetic_msgid};
+use super::query::{run_backlog, run_list_buffers, run_search};
 use super::{
-    Ingest, IngestOutcome, Job, NetworkRow, SearchOutcome, StorageError, StoredMessage,
-    buffer_kind_str, kind_code,
+    Ingest, IngestOutcome, Job, NetworkRow, ReadOutcome, SearchOutcome, StorageError,
+    StoredMessage, buffer_kind_str, kind_code,
 };
 
 const MAX_BATCH_ROWS: usize = 256;
@@ -120,6 +121,29 @@ pub(super) fn run(conn: Connection, jobs: &mpsc::Receiver<Job>, trace: bool) {
                             request,
                             result,
                         });
+                    }
+                    Job::Backlog {
+                        buffer,
+                        anchor,
+                        limit,
+                        client,
+                        request,
+                        reply,
+                    } => {
+                        let result = run_backlog(&conn, buffer, anchor, limit);
+                        if state.trace {
+                            let rows = result.as_ref().map_or(0, Vec::len);
+                            eprintln!("storage backlog buffer={} rows={rows}", buffer.0);
+                        }
+                        let _ = reply.blocking_send(ReadOutcome::Backlog {
+                            client,
+                            request,
+                            result,
+                        });
+                    }
+                    Job::ListBuffers { client, reply } => {
+                        let result = run_list_buffers(&conn);
+                        let _ = reply.blocking_send(ReadOutcome::Buffers { client, result });
                     }
                     Job::Ingest { .. } => unreachable!("handled above"),
                     Job::Shutdown => return,
@@ -311,40 +335,6 @@ fn ensure_buffer_cached(
     Ok((BufferId(id), stored, created))
 }
 
-fn parse_kind(kind: &str) -> BufferKind {
-    match kind {
-        "channel" => BufferKind::Channel,
-        "query" => BufferKind::Query,
-        "server" => BufferKind::Server,
-        _ => BufferKind::Special,
-    }
-}
-
-/// FNV-1a 64, inline: the synthetic-msgid hash is disk format, so it must be
-/// stable across releases (std's DefaultHasher is not) and sha2 fails the
-/// dependency bar for one call site.
-fn fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-    for byte in bytes {
-        hash ^= u64::from(*byte);
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-    }
-    hash
-}
-
-/// §4.6's content-hash fallback for tagless servers: (nick, text, 30s
-/// bucket). Imperfect by design — identical (nick, text) inside one bucket
-/// collapses — and only ever used where nothing better exists.
-fn synthetic_msgid(nick: Option<&str>, text: Option<&str>, millis: i64) -> String {
-    let bucket = millis / 30_000;
-    let seed = format!(
-        "{}\u{0}{}\u{0}{bucket}",
-        nick.unwrap_or(""),
-        text.unwrap_or("")
-    );
-    format!("fnv:{:016x}", fnv1a64(seed.as_bytes()))
-}
-
 fn ensure_network(conn: &Connection, name: &str) -> Result<NetworkRow, StorageError> {
     conn.execute(
         "INSERT INTO network (name) VALUES (?1) ON CONFLICT (name) DO NOTHING",
@@ -373,24 +363,4 @@ fn ensure_buffer(
         |row| row.get(0),
     )?;
     Ok(BufferId(id))
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn fnv_vectors_are_stable() {
-        // Pinned: these values are disk format.
-        assert_eq!(super::fnv1a64(b""), 0xcbf2_9ce4_8422_2325);
-        assert_eq!(super::fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
-        assert_eq!(
-            super::synthetic_msgid(Some("alice"), Some("hello"), 61_000),
-            super::synthetic_msgid(Some("alice"), Some("hello"), 75_000),
-            "same 30s bucket must collapse"
-        );
-        assert_ne!(
-            super::synthetic_msgid(Some("alice"), Some("hello"), 61_000),
-            super::synthetic_msgid(Some("alice"), Some("hello"), 95_000),
-            "different buckets must not"
-        );
-    }
 }

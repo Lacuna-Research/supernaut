@@ -172,7 +172,11 @@ genuinely is.
    `search` command against a seeded corpus.
 9. **Windowed backlog and read markers.** `FetchBacklog` with all four anchors
    including `AroundSearchHit`, limit capped server-side regardless of the request
-   (§4.7, §6.3); `last_read_seq` set/read per buffer. Still no "give me the buffer".
+   (§4.7, §6.3); `last_read_seq` set/read per buffer. Still no "give me the buffer"
+   — and, added at prompt 9a, the other half of §4.5's attach contract: the core
+   *announces* the buffer set to each attaching client (a replay of
+   `BufferCreated` on that session's lane), so a client over a data dir an
+   earlier process wrote can resolve buffers no event of its own introduced.
 10. **Network config and credentials.** TOML config for networks/nick/autojoin as seed
     data; `keyring` with encrypted-file fallback for SASL secrets — never plaintext in
     the config file (§5.8). Ends with the stage acceptance run driven from config
@@ -205,6 +209,12 @@ Covers NORTH-STAR §8 M3.
      lanes via select! with no ordering between an Ack and the event it caused.
      The TUI's projection must dedupe phase transitions and never assume
      response-before-event.
+   - From stage 1 prompt 9a: **`BufferCreated` can arrive AFTER a `Backlog`
+     response naming the same buffer.** Announcements go out on a spawned task
+     (`announce` in `crates/havoc-core/src/core/reads.rs`) while responses go out
+     inline, so the projection must tolerate a *Response* — not just an Event —
+     naming a `BufferId` it has never been told about. The note above covers the
+     opposite ordering; this is the one the attach path introduces.
 2. **Wrapped-line cache.** The largest single piece of original UI work (§4.10): keyed
    on (buffer, width), invalidated on resize, pre-rendered `Line` window around the
    viewport. Its own module, property-tested over random resize sequences (§6.7).
@@ -279,6 +289,21 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
      transport-local by design. The UDS server must perform the same merge
      core-side and give lag/close a frame representation — otherwise the
      loud-lag guarantee silently fails to cross the socket.
+   - From stage 1 prompt 9a: **`FetchBacklog` no longer has an
+     exactly-one-Response guarantee, and nothing on the wire says so.** Read
+     responses ride `Bus::try_direct`, which drops the answer and removes the
+     lane on a full queue, recorded only by an engine-stderr `eprintln`.
+     Embedded mode masks this behind `wiring.rs`'s 256-deep pump; a socket writer
+     will not. The frame protocol needs either a dropped-read signal or a
+     documented at-most-once rule for read responses — decided alongside the
+     Lagged/Closed frame representation the note above already owes.
+   - From stage 1 prompt 9a: **the announcement's unconfigured-network skip is
+     advisory, not a boundary.** `FetchBacklog` in
+     `crates/havoc-core/src/core.rs` is not gated on `state.buffers`, so a client
+     can fetch (and enumerate by probing ids, distinguishing `[]` from "unknown
+     buffer N") history of buffers the announcement deliberately withheld.
+     Harmless under single-user filesystem auth; decide whether the skip rule
+     becomes a real check once the socket makes clients plural.
 2. **Capability handshake.** Feature lists exchanged, intersection operated on; no
    version lockstep (§4.8). The constants live in `havoc-ipc`.
 
@@ -289,6 +314,12 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
      adding a variant to `Event`/`RequestBody` breaks any older peer at decode. The
      handshake must gate *variants*, not just features, behind `havoc_ipc::caps`
      constants, and never send a variant outside the negotiated intersection.
+   - From stage 1 prompt 9a: **`BACKLOG_MAX_LIMIT` is deliberately
+     undiscoverable.** `crates/havoc-core/src/storage/query.rs` keeps the cap
+     core-side on the reasoning that discovery is this handshake's job, and there
+     is no has-more berth — so a client cannot distinguish "capped" from "that is
+     all". The handshake owes the cap as a negotiated *value*, not just feature
+     flags.
 3. **Daemon and attach modes.** `supernaut --daemon` / `supernaut --connect <path>`
    (whether the daemon additionally brands as `havocd` is decided here); socket
    lifecycle and orphan cleanup; detach loses nothing, attach renders from buffers +
@@ -339,6 +370,12 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
      (`crates/havoc-core/migrations/0001_init.sql`). Per-client markers owe a
      migration to a per-client table; make the reconciliation decision knowing the
      current shape can only represent the merged result, never per-client inputs.
+   - From stage 1 prompt 9a: **the read path already hands `last_read_seq` to
+     every attaching client, one value per buffer.** `run_list_buffers`
+     (`crates/havoc-core/src/storage/query.rs`) selects it into `BufferRow` and
+     `announce` copies it into each client's `BufferInfo`. A per-client marker
+     table changes this *read*, not only the write: the announcement becomes
+     per-client, and `run_list_buffers` needs the `ClientId` it currently ignores.
 2. **From the §7 menu, as separate items when chosen.** Candidates: scripting host
    (`mlua`, §5.7), plain-IRC listener (§7.9), inline images (§7.5), OSC 8/52 niceties
    (§7.4), stats (§7.7), live theme reload (§7.8), SASL EXTERNAL / CertFP (§2.3's

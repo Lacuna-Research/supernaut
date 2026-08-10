@@ -277,6 +277,30 @@ for _ in $(seq 1 25); do
 	sleep 0.2
 done
 
+# --- Backlog (prompt 9a): windows over the corpus the flood and the restart
+# built. `wait backlog` counts responses, so a failed window ends the wait with
+# a printed error instead of a timeout with nothing to read.
+BACKLOG_START=$(date +%s)
+printf 'backlog #flood after:0 5\nwait backlog 1 10\n' >&3 || true
+for _ in $(seq 1 50); do
+	grep -q 'waited backlog' "$WORK/a.out" && break
+	sleep 0.2
+done
+# 9999 asked for, 200 delivered: the cap observed from outside the engine.
+printf 'backlog #flood latest 9999\nwait backlog 2 20\n' >&3 || true
+for _ in $(seq 1 100); do
+	[ "$(grep -c 'waited backlog' "$WORK/a.out")" -ge 2 ] && break
+	sleep 0.2
+done
+# Jump-to-context, headless: the anchor is the newest #flood search hit above
+# ("flood line 250"), not a seq this script pasted in.
+printf 'backlog #flood around-hit 7\nwait backlog 3 10\n' >&3 || true
+for _ in $(seq 1 50); do
+	[ "$(grep -c 'waited backlog' "$WORK/a.out")" -ge 3 ] && break
+	sleep 0.2
+done
+BACKLOG_SECS=$(($(date +%s) - BACKLOG_START))
+
 printf 'quit\n' >&3 || true
 exec 3>&-
 wait "$A_PID" 2>/dev/null || true
@@ -284,6 +308,18 @@ A_PID=""
 
 # Keep the capture for the corpus harvest (gitignored; trace-to-steps.sh).
 cp "$WORK/a.trace" .cache/last-a.trace
+
+# The announcement proof (prompt 9a): a process that never dials anything. D
+# opens A's closed data dir, issues no `connect`, and resolves #supernaut purely
+# from the attach-time replay — then reads back a line a different process
+# wrote. It must pass the same --host as A: the network name is derived
+# (debug-<host>) and the replay resolves buffers by that name, a coupling
+# prompt 10a's config file deletes. Two live processes over one file is
+# deliberately not attempted — cached per-buffer seq counters in two writers
+# would race the write path, and stage 4's daemon makes one writer structural.
+printf 'wait buffer #supernaut 10\nbacklog #supernaut latest 5\nwait backlog 1 10\nquit\n' |
+	"$BIN" session --host localhost --port "$TLS_PORT" --nick dave \
+		--tls-ca "$WORK/fullchain.pem" --data-dir "$WORK/data-a" >"$WORK/d.out" 2>&1
 
 fail=0
 assert() {
@@ -345,6 +381,29 @@ fi
 assert "$WORK/a.out" 'hit .*text=xyzzysearchtoken' 'read-your-writes: fresh line searchable through the flush barrier'
 assert "$WORK/a.out" '^error [0-9]' 'malformed MATCH came back as an error, session survived'
 printf 'ok    search wall time %ss over the %s-commit corpus (recorded, not asserted)\n' "$SEARCH_SECS" "$COMMITS"
+
+# --- Backlog windows (prompt 9a).
+assert "$WORK/a.out" 'backlog request=[0-9]* buffer=[0-9]* count=5' 'after:0 returned a five-line window'
+assert "$WORK/a.out" 'line buffer=[0-9]* seq=1 ' 'the after:0 window starts at seq=1, ascending'
+assert "$WORK/a.out" 'backlog request=[0-9]* buffer=[0-9]* count=200' 'the engine capped a 9999-row window at 200'
+# The arithmetic, so a future change to #flood's traffic is diagnosable: "flood
+# line 250" sits at seq 252 (A's join is seq 1, carol's join seq 2, then the 500
+# lines), and limit 7 splits 3 before / 3 after — hence 247 and 253 exactly.
+assert "$WORK/a.out" 'line .*text=flood line 250' 'around-hit centred on the search hit'
+assert "$WORK/a.out" 'line .*text=flood line 247' 'around-hit carried three lines before the hit'
+assert "$WORK/a.out" 'line .*text=flood line 253' 'around-hit carried three lines after the hit'
+printf 'ok    backlog wall time %ss for three windows incl. the 200-row cap (recorded, not asserted)\n' "$BACKLOG_SECS"
+
+# --- The announcement proof: session D never touched the network.
+assert "$WORK/d.out" 'event buffer-created .* name=#supernaut' 'D was told about a buffer it never saw created'
+assert "$WORK/d.out" 'waited buffer #supernaut' 'D resolved #supernaut from the attach replay alone'
+assert "$WORK/d.out" 'line .*text=the deployment failed' "D read another process's history out of a window"
+if grep -q 'event connection-state' "$WORK/d.out"; then
+	printf 'FAIL  %s\n' 'D never dialled anything' >&2
+	fail=1
+else
+	printf 'ok    %s\n' 'D never dialled anything (no connection-state line in its output)'
+fi
 
 # Post-mortem, from outside the process: WAL held, seq contiguous, no dupes.
 DB="$WORK/data-a/history.db"

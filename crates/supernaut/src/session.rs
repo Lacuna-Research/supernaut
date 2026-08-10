@@ -6,17 +6,18 @@
 //! name→BufferId projection the TUI will keep. `wait` verbs exist so
 //! live-run.sh never sleeps.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use havoc_core::connection::io::Security;
 use havoc_core::connection::{SaslConfig, SaslCredentials, SaslMechanism};
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::Storage;
-use havoc_ipc::{BufferId, ConnectionPhase, NetworkId, Request, RequestBody, RequestId};
+use havoc_ipc::{BufferId, ConnectionPhase, NetworkId, Request, RequestBody, RequestId, Seq};
 use havoc_transport::{ClientTransport, InProcess, Incoming, TransportError};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::session_backlog::{print_backlog, request_backlog};
 use crate::session_print::print_event;
 use crate::wiring;
 
@@ -135,6 +136,12 @@ pub(crate) struct SessionState {
     pub(crate) buffers: HashMap<String, BufferId>,
     pub(crate) msg_counts: HashMap<BufferId, u64>,
     pub(crate) search_count: u64,
+    /// The newest search hit per buffer — what `backlog <b> around-hit` uses.
+    pub(crate) last_hits: HashMap<BufferId, Seq>,
+    /// Backlog requests awaiting an answer. `wait backlog` counts *responses*,
+    /// so an Error ends the wait with something printed rather than a timeout.
+    pub(crate) backlog_pending: HashSet<RequestId>,
+    pub(crate) backlog_count: u64,
     pub(crate) phase: Option<ConnectionPhase>,
 }
 
@@ -145,6 +152,9 @@ async fn drive(transport: InProcess) -> Result<(), String> {
         buffers: HashMap::new(),
         msg_counts: HashMap::new(),
         search_count: 0,
+        last_hits: HashMap::new(),
+        backlog_pending: HashSet::new(),
+        backlog_count: 0,
         phase: None,
     };
 
@@ -222,6 +232,11 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
             request(state, RequestBody::SendText { buffer, text }).await?;
             Ok(true)
         }
+        Some("backlog") => {
+            let rest: Vec<&str> = parts.collect();
+            request_backlog(state, &rest).await?;
+            Ok(true)
+        }
         Some("wait") => {
             // registered [secs] | buffer <name> [secs] | message <name> [count] [secs]
             let target = parts.next().unwrap_or("").to_owned();
@@ -242,7 +257,7 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
                     rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1),
                     rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(10),
                 ),
-                "search" => (
+                "search" | "backlog" => (
                     None,
                     rest.first().and_then(|s| s.parse().ok()).unwrap_or(1),
                     rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(10),
@@ -259,14 +274,18 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
     }
 }
 
-async fn request(state: &mut SessionState, body: RequestBody) -> Result<(), String> {
+pub(crate) async fn request(
+    state: &mut SessionState,
+    body: RequestBody,
+) -> Result<RequestId, String> {
     let id = RequestId(state.next_request);
     state.next_request += 1;
     state
         .transport
         .send(Request { id, body })
         .await
-        .map_err(|e| format!("send: {e}"))
+        .map_err(|e| format!("send: {e}"))?;
+    Ok(id)
 }
 
 /// `wait registered|buffer|message ...`: consume (and still print) events
@@ -290,10 +309,14 @@ async fn wait(
                 .is_some_and(|id| state.msg_counts.get(id).copied().unwrap_or(0) >= count)
         }),
         "search" => state.search_count >= count,
+        "backlog" => state.backlog_count >= count,
         _ => true,
     };
-    if !matches!(target, "registered" | "buffer" | "message" | "search") {
-        println!("error - wait knows 'registered', 'buffer', 'message', and 'search'");
+    if !matches!(
+        target,
+        "registered" | "buffer" | "message" | "search" | "backlog"
+    ) {
+        println!("error - wait knows 'registered', 'buffer', 'message', 'search', and 'backlog'");
         return Ok(());
     }
 
@@ -320,13 +343,16 @@ fn handle_incoming(
 ) -> Result<(), String> {
     match incoming {
         Ok(Incoming::Response(response)) => {
+            if state.backlog_pending.remove(&response.id) {
+                state.backlog_count += 1;
+            }
             match response.body {
                 havoc_ipc::ResponseBody::Ack => println!("ok {}", response.id.0),
                 havoc_ipc::ResponseBody::Error { message } => {
                     println!("error {} {message}", response.id.0);
                 }
-                havoc_ipc::ResponseBody::Backlog { .. } => {
-                    println!("ok {} (backlog)", response.id.0);
+                havoc_ipc::ResponseBody::Backlog { messages } => {
+                    print_backlog(response.id, &messages);
                 }
             }
             Ok(())

@@ -207,6 +207,13 @@ pub enum Event {
         #[serde(default)]
         detail: Option<String>,
     },
+    /// "This buffer exists and you did not know it" — **not** "it was just
+    /// created". Fires both when a buffer is first created and when the core
+    /// replays the buffer set to a client attaching over a populated store
+    /// (NORTH-STAR §4.5; §4.7 forbids a client *asking*, so the core
+    /// announces). Receivers must therefore treat it as **idempotent**: a
+    /// duplicate is legal, a missing one is not, and it may arrive for a buffer
+    /// that already has history.
     BufferCreated {
         buffer: BufferInfo,
     },

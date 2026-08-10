@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 8/12 complete. Next: prompt 9a.
+**Status:** 9/12 complete. Next: prompt 9b.
 
 <!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
@@ -950,32 +950,226 @@ tripwire: the backlog window and the announcement mechanism are one read-path
 seam; markers are a write-path seam with its own verb/drain hardening. Revisit if
 the announcement decision turns out to need marker state — nothing suggests it.
 
-*To be written out before it starts.*
+```
+Windowed reads, for real: after this prompt a person opens a fresh session over
+a data dir an earlier process wrote, watches the buffers it never saw get
+announced to it, and pages history in windows — latest, before, after, and
+centred on a search hit — with the limit capped in the engine no matter what is
+asked for (§4.7, §6.3). Nothing gained the power to say "give me the buffer".
 
-### Carry-forward
+Three places the notes, the item, and the frozen wire pull apart, surfaced
+rather than resolved silently:
 
-- From prompt 8: **FetchBacklog will copy search's deferred-response shape —
-  don't copy its swallowed enqueue failure.** The Search arm in
-  `crates/havoc-core/src/core.rs` converts a failed storage send into an
-  immediate Error response; the backlog arm must do the same from the start.
-- From prompt 8: **the search-outcome path rebuilds a bounded-lane-behind-
-  blocking-send topology.** `Job::Search`'s reply rides the bounded (64)
-  `search_tx` via `blocking_send` while core awaits `bus.direct` — a client
-  not draining its directed lane can stall the storage thread behind one
-  reader. Backlog windows are bigger payloads on this same shape: decide the
-  read-side backpressure story in the prompt text (the never-block-history
-  asymmetry cuts differently for reads).
-- From prompt 8: **`wait search` counts success events only — errors are
-  invisible to it and die by timeout.** The `backlog` verb will copy the wait
-  grammar; the sync primitive it actually needs may be response-counting, not
-  event-counting.
-- From prompt 7: **a buffer that predates the core instance is never
-  announced.** `handle_outcome` in `crates/havoc-core/src/core.rs` broadcasts
-  BufferCreated only on first *creation*; restart over a populated data dir and
-  MessageAdded carries BufferIds no event introduced — the CLI's name→id
-  projection cannot resolve them and backlog verbs starve. Decide the
-  announcement mechanism (e.g. buffer-list replay on attach) in the prompt
-  text — the §4.7 fence still forbids "give me the buffer".
+- The buffer-announcement note reads like a §4.7 violation and is not one. The
+  fence forbids an unbounded *message* fetch; enumerating buffers is the §4.5
+  attach contract in as many words ("a fresh client asks what buffers exist and
+  where its read markers are"), the set is bounded by human action rather than
+  by traffic, and it carries no message text. It is settled here by making it
+  not a request at all: the core *announces* at attach and no client can ask.
+  RequestBody grows nothing, so the fence is not approached, let alone crossed.
+- The read-side backpressure note asks for a decision the prompt-5 topology
+  cannot give as shipped: core awaits `bus.direct`, so one wedged reader stalls
+  the select loop, and behind it the storage thread's `blocking_send`. This
+  prompt adds a second bus primitive rather than rewriting the first (below),
+  and leaves search's Response-then-Event pair on the awaiting `direct` —
+  converting an ordered pair needs "what does half a delivered pair mean"
+  answered, which is prompt 9b's verb/drain seam, not this one's. That
+  conversion becomes 9b's carry-forward if it survives review here.
+- The item bundles read markers, which are 9b's. The split is read path vs
+  write path, so the replay here *reads* `buffer.last_read_seq` into
+  `BufferInfo.last_read_seq` — the column has existed since migration 0001 and
+  nothing writes it yet, so every value is NULL today. Filling a field the wire
+  already froze costs nothing and saves 9b a second pass through the read path.
+  Setting it, and `ReadMarkerChanged`, stay in 9b.
+
+The work:
+
+- No wire change: PROTOCOL_VERSION stays 1 and the berths prompt 2 froze are
+  the ones used. Windows come back in ResponseBody::Backlog { messages } — the
+  response itself, not an event — and announcements reuse Event::BufferCreated.
+  Both rejected alternatives were new enum variants (Event::BufferList,
+  Event::BacklogWindow): unknown *fields* are tolerated on this wire, unknown
+  *variants* are not, so either would be a real v1 break bought for a payload
+  shape that already exists. Reusing BufferCreated does restate its meaning —
+  "this buffer exists and you did not know it" rather than "it was just
+  created"; renaming the variant is itself a wire break, so the meaning is
+  documented on the variant instead. When adding variants becomes negotiable —
+  stage 4's handshake, whose constants live in havoc_ipc::caps — revisit
+  batching the replay into one message.
+- The window is always ascending by seq, for every anchor (§4.6: seq is the
+  only order; one order for all four anchors means the client's scroll math has
+  no cases). Against `message`'s (buffer_id, seq) WITHOUT ROWID primary key
+  each anchor is one range scan on the table that *is* the index — which is why
+  the windowed API costs nothing, the §6.3 claim made concrete:
+  - Latest — `WHERE buffer_id = ?1 ORDER BY seq DESC LIMIT ?2`, reversed in
+    Rust.
+  - Before(s) — `... AND seq < ?s ORDER BY seq DESC LIMIT ?n`, reversed.
+    Exclusive: the client is holding s and asked for what precedes it.
+  - After(s) — `... AND seq > ?s ORDER BY seq ASC LIMIT ?n`. Exclusive
+    likewise.
+  - AroundSearchHit(s) — the row at s, plus floor((n-1)/2) rows before it and
+    the remainder after, assembled by calling the same descending and ascending
+    helpers and concatenating. A short side does not grow the other: the hit
+    stays centred even at a buffer edge, so the client's position math is
+    predictable and one cheap After window fills the rest. A seq that no longer
+    exists returns the neighbours around the gap rather than an error — history
+    is append-only today, but retention (stage 6) will make gaps real.
+- Empty window vs unknown buffer, distinguished: no rows in range →
+  Backlog { messages: [] }, the normal end-of-scrollback signal a client pages
+  until; a buffer id absent from the `buffer` table → Error("unknown buffer N"),
+  because a client bug that looks like end-of-scrollback forever is
+  undebuggable. One SELECT on `buffer` inside the same job decides which.
+- The cap: BACKLOG_MAX_LIMIT = 200, in crates/havoc-core/src/storage/query.rs
+  beside SEARCH_MAX_HITS, applied as `limit.min(cap)` at the single site that
+  binds the SQL LIMIT, so every later caller inherits it. 200 is two screens at
+  any sane terminal height and tens of KB on the wire. `limit == 0` is an
+  Error, not an empty window — asking for nothing is a client bug and answering
+  it politely hides it. The constant stays core-side rather than in
+  havoc_ipc::caps: a client that compiles the cap in is a client that breaks
+  when it moves; discovery is the stage-4 handshake's job, and that file says so
+  already.
+- Two new read jobs on the one connection, behind the existing
+  flush-before-non-ingest barrier, so a window sees the line that landed a
+  millisecond ago exactly as search does: Job::Backlog { buffer, anchor, limit,
+  client, request, reply } and Job::ListBuffers { client, reply }, both
+  fire-and-forget like Job::Search. One reply lane, not two: ReadOutcome::{
+  Backlog, Buffers } over a new bounded (64) `reads_tx`, so core grows one
+  select arm. Under the existing trace flag the thread prints one
+  `storage backlog buffer=N rows=K` line per window — measurement is grep, and
+  the two-eprintln stance stands.
+- Storage rows stay core-private (prompt 3's fence): ListBuffers returns
+  Vec<BufferRow> { id, network_name, name, kind, last_read_seq }. The row knows
+  a network_id, never the caller's NetworkId, and minting a wire id inside
+  storage is precisely the id-space confusion NetworkRow was created to kill.
+- Row hydration becomes one private fn in query.rs used by both run_search and
+  run_backlog. Two uses, not three, and deliberately: the duplicate is the
+  block where kind_from_code's loud-on-unknown behaviour would fork silently.
+- The FetchBacklog arm in crates/havoc-core/src/core.rs mirrors the Search arm
+  including the part search only got right after review — a failed enqueue
+  becomes an immediate ResponseBody::Error("storage unavailable: {e}"), never a
+  swallowed promise. Success returns None; the one promised Response arrives
+  with the window.
+- Attach grows the announcement: `bus.register`, then enqueue Job::ListBuffers.
+  On the outcome, core maps each BufferRow's network_name back to a caller
+  NetworkId by matching `state.settings` values' `name` — the same string
+  ensure_network keyed on — and skips any buffer whose network is not
+  configured: a BufferInfo carrying a NetworkId the client cannot name is worse
+  than an absence, and that history reappears the moment the network returns to
+  config. Core also seeds `state.buffers` from the resolved list, which is what
+  makes SendText to a buffer from a previous run answer "buffer's network is
+  not connected" instead of "unknown buffer".
+- Delivery of the replay is a short-lived spawned task holding a clone of the
+  session's lane (new Bus::lane(id) -> Option<Sender<Directed>>), awaiting once
+  per announcement. Reasoning: a just-attached client may not have started
+  reading yet, the list can exceed the lane's 64 slots, and neither the core
+  loop nor the storage thread may wait on it. Ordering against broadcast
+  traffic is deliberately not guaranteed; the contract is that announcements
+  are idempotent — a duplicate is legal, a missing one is not — which is also
+  what makes the race between the ListBuffers snapshot and a concurrent
+  BufferCreated a non-event. The CLI's HashMap insert already satisfies it.
+- Read-side backpressure, decided: Bus::try_direct(id, message) -> bool,
+  non-blocking. Closed removes the lane silently (an ordinary detach,
+  unchanged); Full removes it after one loud eprintln naming the ClientId.
+  Backlog responses go out this way. The asymmetry the note asked for, stated
+  plainly: writes are buffered without bound because a lost line is
+  unrecoverable, reads are dropped because a read is by definition re-askable —
+  the engine must never hold history behind a reader that has ignored 64
+  answers and asked for a 65th. handle_outcome's broadcast path is untouched
+  (it never awaited a client), and run()'s immediate-response `direct` stays
+  as-is (see the surfaced conflict).
+- CLI, crates/supernaut/src/session.rs: `backlog <buffer> <anchor> [limit]`
+  with anchor `latest | before:<seq> | after:<seq> | around:<seq> |
+  around-hit`, resolving the name through the same projection `send` uses.
+  `around-hit` uses the newest SearchResults hit seen for that buffer
+  (SessionState.last_hits: HashMap<BufferId, Seq>), so the jump-to-context flow
+  AroundSearchHit exists for is the flow the harness actually exercises rather
+  than a seq the script pasted in.
+- `wait backlog [count] [secs]` counts **responses**, not events — the note's
+  fix: SessionState.backlog_pending: HashSet<RequestId> filled at request time,
+  and both Backlog and Error responses for those ids increment the counter, so
+  a failed window ends the wait with a printed error instead of a timeout with
+  nothing to read. `wait search`'s event-counting blindness is deliberately
+  left alone and named as prompt 9b's (it owns verb hardening); if
+  response-counting proves the better primitive, that is where it converts.
+- Printing: handle_incoming's placeholder `ok N (backlog)` is replaced, not
+  joined, by one `backlog request=N buffer=B count=K` line plus one
+  `line buffer= seq= nick= text=` per message in order. The count on the header
+  is how a capped window stays visible with no has-more berth on the wire.
+  Anchor parsing and this printing live in a new
+  crates/supernaut/src/session_backlog.rs for the same reason session_print.rs
+  exists: session.rs is at 349 lines against the 400-line ratchet.
+- scripts/live-run.sh, two segments. First, before A quits, over the corpus the
+  flood and the restart already built: `backlog #flood after:0 5` → five
+  ascending lines starting at seq=1; `backlog #flood latest 9999` → count=200,
+  the cap observed from outside the engine; and after the existing
+  `search in:#flood "flood line 250"`, `backlog #flood around-hit 7` → the hit
+  centred, with `flood line 247` and `flood line 253` both present. Backlog
+  wall time recorded, not asserted, as search's is.
+- Second, the announcement proof, which requires a process that never touches
+  the network: after A has quit and closed its database, a session D over the
+  same `--data-dir "$WORK/data-a"` issuing no `connect` at all — `wait buffer
+  #supernaut 10` succeeds purely from the replay, `backlog #supernaut latest 5`
+  returns `text=the deployment failed` that an earlier process wrote, and D's
+  output contains no connection-state line. D must pass the same `--host` as A:
+  the network name is derived (`format!("debug-{}", host)`) and the replay
+  resolves buffers by that name — a coupling prompt 10a's config file deletes.
+  Two live processes over one file is deliberately not attempted: cached
+  per-buffer seq counters in two writers would race the write path, and
+  demonstrating the read path is not the place to discover that (stage 4's
+  daemon makes one writer structural).
+- Tests. Storage: the four anchors against a seeded buffer — ascending always,
+  Before/After exclusive, the around-window centred and still centred at both
+  edges, a vanished hit seq returning its neighbours; u32::MAX capped to 200;
+  limit 0 an error; unknown buffer an error where an out-of-range window is a
+  success. Core: a new crates/havoc-core/tests/core_backlog.rs — attach over a
+  populated store with a settings map whose `name` matches the seeded network,
+  assert the BufferCreated replay lands on the attaching session's lane and on
+  no other, then a FetchBacklog whose Response carries the window; plus the
+  unconfigured-network skip. Bus: try_direct returns false and drops the lane
+  on Full, silently on Closed. Implementer's warning: existing assertions that
+  expect a specific *first* message on a directed lane
+  (crates/havoc-core/tests/core_search.rs) must skip replay events rather than
+  assume none arrive.
+- The diff stays inside the 800-line tripwire this split bought. If the test
+  surface pushes past it, the storage-level edge-case anchors are what trails
+  into 9b — never the live run.
+
+Acceptance: run scripts/live-run.sh. Before A quits, watch `backlog #flood
+after:0 5` print five ascending lines starting at seq=1, watch `backlog #flood
+latest 9999` come back as count=200 — the engine refusing the number it was
+handed — and watch `backlog #flood around-hit 7` print the "flood line 250" hit
+with 247 and 253 around it: jump-to-context, headless. Then watch a process
+that never dials anything: session D over A's data dir resolves #supernaut from
+the attach announcement alone and reads "the deployment failed" back out of
+history a different process wrote, with no connection-state line anywhere in
+its output. The script exits 0. cargo test --workspace green including the
+four-anchor, cap, and attach-replay-leak tests; make check green with the
+ratchets not worsened (measure session.rs).
+
+Do not: read markers — set, event, or verb (prompt 9b: the write path, with its
+own verb and drain hardening); any RequestBody addition, a buffer-list request
+above all (§4.7's fence; §4.5 makes it an announcement instead); any new Event
+or ResponseBody variant (unknown variants are not serde-tolerant, so it is a
+real v1 break — stage 4's handshake is where additions become negotiable);
+CHATHISTORY or any upstream backfill when a window runs off the start of local
+history (stage 5 — the same FetchBacklog shape maps onto it, which is the
+point, but a real bouncer is the only honest test); a has-more or total-count
+field (a wire change to remove an ambiguity the CLI's count line already shows;
+stage 2's scroll UX decides whether it earns one); snippet/highlight or kind
+filtering inside a window (presentation, stage 2 — the window returns every
+row, Joins included); a second read-only SQLite connection (still no
+measurement, and the barrier is the read-your-writes guarantee); converting
+search's Response+Event pair to try_direct or fixing `wait search` (both prompt
+9b); new dependencies (nothing here needs one); and no async facade over
+StorageClient — the read jobs copy the fire-and-forget lane ingest and search
+already use.
+```
+
+**Status:** complete. Shipped per the JIT detail with one recorded deviation: the
+implementer's warning about `core_search.rs` did not bite — that test spawns core with
+an empty settings map, so nothing resolves and nothing is announced, and it passes
+untouched. The announcement proof is the payoff: a process that never dials anything
+reads another process's history back out of a window.
 
 ---
 
@@ -1014,6 +1208,34 @@ the room the accumulated verb/drain hardening needs.
   a `send` acknowledged by dispatch may never have gone out. Decide here
   whether "sent" needs an actor-side outcome or a documented at-most-once
   caveat, before the TUI composer inherits it.
+- From prompt 9a: **the replay task and `try_direct` fight over the same
+  64-slot lane, and search still awaits it.** `Bus::try_direct`
+  (`crates/havoc-core/src/bus.rs`) drops the lane on Full, while the
+  announcement task (`crates/havoc-core/src/core/reads.rs`, `announce`)
+  deliberately fills it — up to one message per buffer against
+  `mpsc::channel(64)`. `handle_search_outcome` still `.await`s `bus.direct`, so
+  a client that awaits a Response without draining events can be deadlocked by
+  a replay it never asked for; and a replay task parked on a wedged lane holds
+  its Sender clone indefinitely, making the Full-drop outcome nondeterministic
+  (zombie vs loud-kill). Decide the fate of both awaits together, and add the
+  >64-buffer attach as the test (a bare `Session` with no pump over a
+  65-buffer store, then a `FetchBacklog`).
+- From prompt 9a: **`wait backlog` is response-counting and `wait search` is
+  event-counting, in one struct.** `SessionState` carries both
+  `backlog_pending`/`backlog_count` and the older `search_count`
+  (`crates/supernaut/src/session.rs`); when fixing `wait search`, replace
+  `search_count` with the `backlog_pending` pattern rather than adding a
+  parallel one — and the response counter must stay BEFORE the body match in
+  `handle_incoming` or errors go back to being invisible.
+- From prompt 9a: **live-run.sh's announcement proof depends on "the deployment
+  failed" being inside `#supernaut`'s last five rows.** Session D reads
+  `backlog #supernaut latest 5`; any traffic a mark-read segment adds to A's
+  #supernaut before quit silently pushes the line out of the window, and the
+  failure reads as "announcement broke". Anchor D's read (`after:0`, or a larger
+  limit) before adding #supernaut traffic.
+- From prompt 9a: **`SetReadMarker` still answers "SetReadMarker arrives in
+  prompt 9".** `crates/havoc-core/src/core.rs` — fix the string as part of
+  replacing the arm.
 
 ---
 
@@ -1051,6 +1273,17 @@ references a password in any version, not an unsplit prompt.
 - From prompt 6 (config half): **`--tls-ca` and `NetworkSettings.security`
   are installed base.** The TOML schema must own per-network `tls_ca`, and the
   loopback-only plaintext rule needs a new home once config supplies the host.
+- From prompt 9a: **the announcement resolves buffers by network name and
+  silently collapses duplicates.** `announce` in
+  `crates/havoc-core/src/core/reads.rs` builds `HashMap<&str, NetworkId>` from
+  `state.settings`; two configured networks sharing a `name` mean every buffer
+  of one is announced under the other's NetworkId, with no error. Make `name`
+  uniqueness a validated config invariant, not an assumption inside `announce`.
+- From prompt 9a: **live-run.sh's session D hard-codes `--host localhost` solely
+  because the network name is `debug-<host>`.** That same-host coupling is what
+  makes A's rows resolvable to D; when config becomes the authority for network
+  names, switch that segment to the config file in the same commit, or the
+  announcement proof passes (or fails) for the wrong reason.
 
 ---
 

@@ -1,6 +1,7 @@
 //! Ingest/identity/search tests for the storage thread — split from mod.rs
 //! for the size ratchet alone. Real temp-file SQLite throughout; a mock would
-//! test the mock.
+//! test the mock. The backlog windows live in the `backlog` submodule, same
+//! reason; it reuses `item`/`drain` from here.
 use super::*;
 use havoc_ipc::MessageKind;
 
@@ -284,3 +285,5 @@ fn v1_database_upgrades_and_backfills() {
     drop(storage);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+mod backlog;

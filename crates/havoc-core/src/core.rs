@@ -8,6 +8,8 @@
 //! id stays core-private and is mapped here. That keeps embedded and attached
 //! modes on identical footing (§4.3).
 
+mod reads;
+
 use std::collections::HashMap;
 
 use havoc_ipc::{
@@ -19,7 +21,8 @@ use crate::bus::{Bus, ClientId, Directed};
 use crate::connection::actor::{self, ActorCommand, ActorReport, ActorSpawn};
 use crate::connection::io::Security;
 use crate::connection::{Config as ConnectionConfig, Networks};
-use crate::storage::{IngestOutcome, NetworkRow, SearchOutcome, StorageClient};
+use crate::storage::{IngestOutcome, NetworkRow, ReadOutcome, SearchOutcome, StorageClient};
+use reads::{handle_read_outcome, handle_search_outcome, wire};
 
 /// Everything needed to reach one configured network. Flags today, config
 /// file at prompt 10.
@@ -102,6 +105,7 @@ struct CoreState {
     reports_tx: mpsc::UnboundedSender<(NetworkId, ActorReport)>,
     outcome_tx: mpsc::Sender<IngestOutcome>,
     search_tx: mpsc::Sender<SearchOutcome>,
+    reads_tx: mpsc::Sender<ReadOutcome>,
 }
 
 async fn run(
@@ -115,6 +119,7 @@ async fn run(
     let (reports_tx, mut reports) = mpsc::unbounded_channel::<(NetworkId, ActorReport)>();
     let (outcome_tx, mut outcomes) = mpsc::channel::<IngestOutcome>(1024);
     let (search_tx, mut searches) = mpsc::channel::<SearchOutcome>(64);
+    let (reads_tx, mut reads) = mpsc::channel::<ReadOutcome>(64);
     let mut state = CoreState {
         storage,
         settings,
@@ -125,12 +130,19 @@ async fn run(
         reports_tx,
         outcome_tx,
         search_tx,
+        reads_tx,
     };
 
     loop {
         tokio::select! {
             Some((client, lane)) = attach.recv() => {
                 bus.register(client, lane);
+                // §4.5's attach contract: a fresh client is *told* what buffers
+                // exist. Not a request — RequestBody grows nothing, so §4.7's
+                // fence is not approached, let alone crossed.
+                if let Err(e) = state.storage.list_buffers(client, state.reads_tx.clone()) {
+                    eprintln!("attach: buffer announcement unavailable: {e}");
+                }
             }
             Some((client, request)) = requests.recv() => {
                 if let Some(response) = handle_request(&mut state, client, request).await {
@@ -145,6 +157,9 @@ async fn run(
             }
             Some(search) = searches.recv() => {
                 handle_search_outcome(&mut bus, search).await;
+            }
+            Some(read) = reads.recv() => {
+                handle_read_outcome(&mut state, &mut bus, read);
             }
             else => return,
         }
@@ -182,7 +197,21 @@ async fn handle_request(
             },
             None => error(format!("unknown buffer {}", buffer.0)),
         },
-        RequestBody::FetchBacklog { .. } => error("FetchBacklog arrives in prompt 9".to_owned()),
+        RequestBody::FetchBacklog {
+            buffer,
+            anchor,
+            limit,
+        } => {
+            // A failed enqueue must not swallow the one promised Response —
+            // the same reviewer catch the Search arm carries.
+            match state
+                .storage
+                .backlog(buffer, anchor, limit, client, id, state.reads_tx.clone())
+            {
+                Ok(()) => return None,
+                Err(e) => error(format!("storage unavailable: {e}")),
+            }
+        }
         RequestBody::Search { query } => match crate::search::parse(&query) {
             Err(message) => error(message),
             Ok(spec) => {
@@ -200,56 +229,6 @@ async fn handle_request(
         RequestBody::SetReadMarker { .. } => error("SetReadMarker arrives in prompt 9".to_owned()),
     };
     Some(Response { id, body })
-}
-
-/// Response first (Ack, or the SQLite error for a malformed MATCH — user
-/// input never hangs and is never swallowed), then the correlated hits on
-/// the directed lane only. Errors get no event.
-async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome) {
-    let SearchOutcome {
-        client,
-        request,
-        result,
-    } = outcome;
-    match result {
-        Err(message) => {
-            bus.direct(
-                client,
-                Directed::Response(Response {
-                    id: request,
-                    body: ResponseBody::Error { message },
-                }),
-            )
-            .await;
-        }
-        Ok(rows) => {
-            bus.direct(
-                client,
-                Directed::Response(Response {
-                    id: request,
-                    body: ResponseBody::Ack,
-                }),
-            )
-            .await;
-            let hits = rows
-                .into_iter()
-                .map(|(buffer, m)| havoc_ipc::Message {
-                    buffer,
-                    seq: m.seq,
-                    kind: m.kind,
-                    nick: m.nick,
-                    text: m.text.unwrap_or_default(),
-                    server_time: m.server_time,
-                    tags: m.tags,
-                })
-                .collect();
-            bus.direct(
-                client,
-                Directed::Event(Event::SearchResults { request, hits }),
-            )
-            .await;
-        }
-    }
 }
 
 async fn connect(state: &mut CoreState, network: NetworkId) -> ResponseBody {
@@ -333,15 +312,7 @@ fn handle_outcome(state: &mut CoreState, bus: &Bus, outcome: IngestOutcome) {
     }
     if let Some(message) = outcome.message {
         bus.broadcast(Event::MessageAdded {
-            message: havoc_ipc::Message {
-                buffer: outcome.buffer,
-                seq: message.seq,
-                kind: message.kind,
-                nick: message.nick,
-                text: message.text.unwrap_or_default(),
-                server_time: message.server_time,
-                tags: message.tags,
-            },
+            message: wire(outcome.buffer, message),
         });
     }
 }
