@@ -78,10 +78,6 @@ The blocking annotation is machine-read: `*(blocking: prompt 5)*` or
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
-- **SASL mechanism set for stage 1.** *(blocking: prompt 4)* §2.3 promises SASL as the
-  standard path *and* CertFP supported; §8 M1 says only "SASL". PLAIN-over-TLS only,
-  or PLAIN + EXTERNAL from the start? The mechanism-selection shape in the state
-  machine is easier to design with two mechanisms in view than to retrofit around one.
 - **Config vs. runtime state.** *(blocking: prompt 10)* Where does "I joined this
   channel manually" live — config file or database? (NORTH-STAR §9: leaning database,
   config as seed only.) Prompt 10 ships the config file, so it settles here. Until
@@ -292,9 +288,18 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
 
 1. **Multi-client attach and read-marker reconciliation.** Settle the Still-open
    reconciliation question first, then N attached clients.
+
+   ### Carry-forward
+   - From stage 1 prompt 3: **`last_read_seq` is one nullable column on `buffer` —
+     single-marker-per-buffer is now disk shape**
+     (`crates/havoc-core/migrations/0001_init.sql`). Per-client markers owe a
+     migration to a per-client table; make the reconciliation decision knowing the
+     current shape can only represent the merged result, never per-client inputs.
 2. **From the §7 menu, as separate items when chosen.** Candidates: scripting host
    (`mlua`, §5.7), plain-IRC listener (§7.9), inline images (§7.5), OSC 8/52 niceties
-   (§7.4), stats (§7.7), live theme reload (§7.8). Each choice gets a decision entry
+   (§7.4), stats (§7.7), live theme reload (§7.8), SASL EXTERNAL / CertFP (§2.3's
+   "CertFP supported" promise — the mechanism slot exists in the state machine per
+   the 2026-08-10 SASL decision; needs client-cert plumbing in rustls + keyring). Each choice gets a decision entry
    and its own numbered item here before any prompt exists.
 3. **Release.** Banner and personality (§2.1); packaging, docs, distribution; the
    retention-policy answer documented as a user promise. (The name is settled —
