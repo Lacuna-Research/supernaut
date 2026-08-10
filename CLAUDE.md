@@ -1,7 +1,7 @@
-# HAVOC — Project Instructions
+# Supernaut — Project Instructions
 
-A terminal IRC client: headless core, Ratatui TUI, SQLite history. `NORTH-STAR.md`
-holds the why; `PLAN.md` roadmap · `STAGE-1-PROMPTS.md` queue · `BUILD-LOG.md` history.
+A terminal IRC client: headless havoc engine, Ratatui TUI, SQLite history. The why:
+`NORTH-STAR.md` · `PLAN.md` roadmap · `STAGE-1-PROMPTS.md` queue · `BUILD-LOG.md` log.
 
 ## Build standards
 
@@ -11,9 +11,9 @@ holds the why; `PLAN.md` roadmap · `STAGE-1-PROMPTS.md` queue · `BUILD-LOG.md`
   requires a decision entry in `BUILD-LOG.md` and an edit to that allowlist, which
   fails the build otherwise. Vendored fixtures must record their upstream commit SHA.
 - **Crate dependency boundaries (NORTH-STAR §4.2) are machine-enforced** on the
-  Cargo.tomls: `havoc-tui` never touches rusqlite/rustls/irc-proto, `havoc-core` never
-  touches ratatui/crossterm, `havoc-ipc` stays near zero-dep. If the TUI needs a core
-  type, the type moves to `havoc-ipc`.
+  Cargo.tomls: `supernaut-tui` never touches rusqlite/rustls/irc-proto, `havoc-core`
+  never touches ratatui/crossterm, `havoc-ipc` stays near zero-dep. If the TUI needs a
+  core type, the type moves to `havoc-ipc`.
 
 ## Working method
 
@@ -37,10 +37,10 @@ item, its notes, and the relevant source, never the previous session — never e
    (<reason>)` — the honesty is the requirement, not the ritual. Consumed notes get
    acted on, deleted, and recorded in `**Carry-forward consumed:**` — as a pair.
 3. Push anything deferred into `PLAN.md` at the stage where it belongs.
-4. Run it live, not only under test: the debug CLI (headless stages) or the client
-   itself against a local `ergo` ircd or Libera.Chat, isolated `HAVOC_CONFIG_DIR`. A
-   change with no observable behavior may record `**Live run:** N/A (<reason>)` —
-   claiming a run that did not happen is the one dishonesty that matters most here.
+4. Run it live, not only under test: the debug CLI (headless stages) or the client,
+   against local `ergo` or Libera.Chat, isolated `SUPERNAUT_CONFIG_DIR`. A change with
+   no observable behavior may record `**Live run:** N/A (<reason>)` — claiming a run
+   that did not happen is the one dishonesty that matters most here.
 5. Bump the `**Status:**` line, then `make check`, merge, and leave the worktree — a
    prompt ends at the repo root, not in its worktree.
 
@@ -92,9 +92,9 @@ silently; prunes need none.
 
 ## Where things live · Secrets
 
-Config `$XDG_CONFIG_HOME/havoc` (TOML), data `$XDG_DATA_HOME/havoc` (SQLite), socket
-`$XDG_RUNTIME_DIR/havoc/core.sock` — overridable via `HAVOC_CONFIG_DIR`; the program
-never writes to its own source tree, not even gitignored. Config paths are public API.
-SASL/NickServ credentials live in the OS keyring (encrypted-file fallback), never
-plaintext in config, logs, or the database. Fixture credentials must be recognisably
-fake, never a real-shaped token.
+Config `$XDG_CONFIG_HOME/supernaut` (TOML), data `$XDG_DATA_HOME/supernaut` (SQLite),
+socket `$XDG_RUNTIME_DIR/supernaut/core.sock` — overridable via `SUPERNAUT_CONFIG_DIR`;
+the program never writes to its own source tree, not even gitignored. Config paths are
+public API. SASL/NickServ credentials live in the OS keyring (encrypted-file fallback),
+never plaintext in config, logs, or the database. Fixture credentials must be
+recognisably fake, never a real-shaped token.

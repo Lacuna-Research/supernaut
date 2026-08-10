@@ -453,3 +453,19 @@ The architecture makes this trivially safe to add later since it is just another
 ---
 
 *Amendments to this document should be dated and appended, not silently edited.*
+
+---
+
+## Amendment — 2026-08-09: the name
+
+The app is **Supernaut**. `supernaut` is the binary users run and the name on
+everything user-facing: config `$XDG_CONFIG_HOME/supernaut`, data
+`$XDG_DATA_HOME/supernaut`, socket `$XDG_RUNTIME_DIR/supernaut/core.sock`, and the
+frontend crate `supernaut-tui`.
+
+`havoc` survives as the name of the headless part, per the header's original framing:
+the engine crates `havoc-core`, `havoc-ipc`, and `havoc-transport`, and — if the
+standalone daemon earns its own brand at the daemon stage — `havocd`. References to
+`havoc`/`havocd` in the body above should be read through this mapping. §9's "The
+name" open question is settled; the reasoning is a decision entry in `BUILD-LOG.md`
+dated today.

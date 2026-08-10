@@ -252,3 +252,28 @@ holds the why, and divergence gets a decision entry.
 **Carry-forward consumed:** none in truth — the removed block was the placeholder
 example in the template's queue file (`Prompt <K+1>`), deleted wholesale when the real
 stage-1 queue replaced the placeholder. No live note existed to consume.
+
+## Decision — the name: Supernaut, with havoc as the headless engine
+**Date:** 2026-08-09  **Affects:** NORTH-STAR.md (dated amendment), CLAUDE.md, PLAN.md, STAGE-1-PROMPTS.md, README.md, scripts/check-docs.sh, scripts/test-checks.sh
+
+**Chose:** the app is **Supernaut** (user's call, made in conversation): binary crate
+`supernaut`, frontend crate `supernaut-tui`, user-facing paths
+`$XDG_CONFIG_HOME/supernaut` / `$XDG_DATA_HOME/supernaut` /
+`$XDG_RUNTIME_DIR/supernaut/core.sock`, env override `SUPERNAUT_CONFIG_DIR`. `havoc`
+survives as the headless engine family — `havoc-core`, `havoc-ipc`,
+`havoc-transport` — per the user's "if we have a headless part, we could call it
+that"; whether the daemon additionally brands as `havocd` is deferred to stage 4's
+daemon-modes item. Applied now, before any code exists, across all working docs and
+the boundary/allowlist checks; NORTH-STAR.md amended by dated appendix per its own
+rule. The "The name" Still-open item is deleted; stage 6's rename item collapsed into
+plain "Release".
+**Over:** keeping `havoc` as a placeholder until the stage-6 rename the plan carried,
+or renaming every crate to the `supernaut-` prefix.
+**Because:** pre-code, the rename is a docs-only diff; post-code it touches binary
+names, socket paths, config dirs, and the crate prefix (exactly what the Still-open
+item warned). The split prefix is semantic, not cosmetic: `supernaut` names what the
+user touches, `havoc` names the engine the §4.2 boundary protects — the ipc and
+transport crates sit on the engine side of that boundary, so they keep its name.
+**Revisit if:** the stage-4 daemon work finds the two-name split confusing in
+`--help`/docs; the fallback is `supernaut`-everything, which stays a mechanical
+rename of two crate names while the engine crates are pre-1.0.

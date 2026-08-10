@@ -422,7 +422,7 @@ fi
 # time a prompt actually needs them — not before.
 # ---------------------------------------------------------------------------
 rule='dep-allowlist'
-DEP_ALLOWLIST=" serde time bitflags tokio tokio-util tokio-rustls rustls rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml havoc havoc-ipc havoc-core havoc-tui havoc-transport "
+DEP_ALLOWLIST=" serde time bitflags tokio tokio-util tokio-rustls rustls rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml supernaut supernaut-tui havoc-ipc havoc-core havoc-transport "
 
 # Dependency crate names declared in a Cargo.toml: keys inside any *dependencies*
 # section, plus the `[dependencies.foo]` header form. Does not resolve `package = `
@@ -479,7 +479,7 @@ fi
 # 16a. Crate dependency boundaries — NORTH-STAR.md §4.2, pitfall 2.
 #
 # "The dependency graph *is* the architecture." The predicted failure is someone
-# adding rusqlite to havoc-tui "just for this one query", which is the first step of
+# adding rusqlite to supernaut-tui "just for this one query", which is the first step of
 # the erosion that makes the daemon split a rewrite. The crate graph enforces this at
 # compile time only once the dep is used; this check fails at the moment it is
 # *declared*, which is earlier and names the rule being broken. Declared-only (grep on
@@ -502,7 +502,7 @@ check_boundary() { # <manifest> <forbidden dep>...
 		ok "$m respects its crate boundary"
 	fi
 }
-check_boundary "$SOURCE_DIR/havoc-tui/Cargo.toml" rusqlite rustls tokio-rustls irc-proto
+check_boundary "$SOURCE_DIR/supernaut-tui/Cargo.toml" rusqlite rustls tokio-rustls irc-proto
 check_boundary "$SOURCE_DIR/havoc-core/Cargo.toml" ratatui crossterm termion termwiz
 check_boundary "$SOURCE_DIR/havoc-transport/Cargo.toml" rusqlite ratatui crossterm irc-proto
 

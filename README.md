@@ -1,15 +1,15 @@
-# havoc
+# Supernaut
 
 A terminal IRC client for people who want the client to already be good, not to
 become good after three weekends of configuration.
 
-Headless core (`havoc-core`) that owns connections, history, and state; a Ratatui
-frontend (`havoc-tui`) that owns nothing but the viewport. Modern IRC — TLS, SASL,
-IRCv3 — as the normal path. Every line you have ever seen lands in SQLite and is
-searchable in milliseconds.
+A headless engine — **havoc** (`havoc-core`) — owns connections, history, and
+state; a Ratatui frontend (`supernaut-tui`) owns nothing but the viewport. Modern
+IRC — TLS, SASL, IRCv3 — as the normal path. Every line you have ever seen lands
+in SQLite and is searchable in milliseconds.
 
 **Status: pre-alpha.** Nothing runs yet; the design baseline is written and the
-build is being stood up. `havoc` is a working codename.
+build is being stood up.
 
 ## Orientation
 
