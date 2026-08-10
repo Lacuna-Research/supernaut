@@ -11,6 +11,7 @@
 //! batched transactions all enforced here, where the single writer lives.
 
 mod exec;
+mod identity;
 mod migrations;
 mod query;
 
@@ -22,7 +23,8 @@ use std::thread;
 use exec::run;
 use std::collections::BTreeMap;
 
-use havoc_ipc::{BufferId, BufferKind, MessageKind, NetworkId, Seq, ServerTime};
+use havoc_ipc::{Anchor, BufferId, BufferKind, MessageKind, NetworkId, Seq, ServerTime};
+pub use identity::{buffer_kind_str, kind_code, kind_from_code};
 pub use migrations::MigrationReport;
 use rusqlite::{Connection, OpenFlags};
 
@@ -63,52 +65,6 @@ impl From<rusqlite::Error> for StorageError {
     }
 }
 
-/// The stable `message.kind` column encoding of [`MessageKind`]. A deliberate
-/// mapping, not a derive: the integers are a disk format, and reordering the
-/// enum must not be able to silently rewrite history's meaning.
-pub fn kind_code(kind: MessageKind) -> i64 {
-    match kind {
-        MessageKind::Privmsg => 0,
-        MessageKind::Notice => 1,
-        MessageKind::Join => 2,
-        MessageKind::Part => 3,
-        MessageKind::Quit => 4,
-        MessageKind::Mode => 5,
-        MessageKind::Topic => 6,
-        MessageKind::Nick => 7,
-        MessageKind::Server => 8,
-    }
-}
-
-/// The inverse of [`kind_code`], for hydrating search hits. Loud on an
-/// unknown code — a row this build cannot name is a bug, never a default.
-pub fn kind_from_code(code: i64) -> Option<MessageKind> {
-    Some(match code {
-        0 => MessageKind::Privmsg,
-        1 => MessageKind::Notice,
-        2 => MessageKind::Join,
-        3 => MessageKind::Part,
-        4 => MessageKind::Quit,
-        5 => MessageKind::Mode,
-        6 => MessageKind::Topic,
-        7 => MessageKind::Nick,
-        8 => MessageKind::Server,
-        _ => return None,
-    })
-}
-
-/// The stable `buffer.kind` column encoding of [`BufferKind`] — matches the
-/// snake_case the wire uses, by choice recorded here rather than by accident
-/// of a serde attribute elsewhere.
-pub fn buffer_kind_str(kind: BufferKind) -> &'static str {
-    match kind {
-        BufferKind::Channel => "channel",
-        BufferKind::Query => "query",
-        BufferKind::Server => "server",
-        BufferKind::Special => "special",
-    }
-}
-
 /// A storage-row id for a network — deliberately a different type from the
 /// wire's caller-assigned `NetworkId`, so the two id spaces can never be
 /// swapped silently (they were both `1` in every test).
@@ -140,6 +96,40 @@ pub struct SearchOutcome {
     /// Err carries the SQLite message (a malformed MATCH string is user
     /// input; it comes back as a Response::Error, never a hang).
     pub result: Result<Vec<(BufferId, StoredMessage)>, String>,
+}
+
+/// One row of the `buffer` table, for the attach-time announcement. Storage
+/// rows stay core-private (prompt 3's fence): this carries the *network name*,
+/// never a caller `NetworkId` — the row knows a `NetworkRow`, and minting a
+/// wire id inside storage is the id-space confusion `NetworkRow` exists to
+/// kill. Core maps the name back.
+#[derive(Debug, Clone)]
+pub struct BufferRow {
+    pub id: BufferId,
+    pub network_name: String,
+    pub name: String,
+    pub kind: BufferKind,
+    /// Read from migration 0001's column. Nothing writes it until prompt 9b,
+    /// so every value is NULL today — filling a field the wire already froze
+    /// costs nothing and saves 9b a second pass through the read path.
+    pub last_read_seq: Option<Seq>,
+}
+
+/// A finished read job, correlated back to the session that caused it. One
+/// reply lane for both, not two: core grows a single select arm.
+#[derive(Debug)]
+pub enum ReadOutcome {
+    Backlog {
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        /// `Err` is a client bug (unknown buffer, zero limit); an empty window
+        /// is `Ok(vec![])`, the end-of-scrollback signal.
+        result: Result<Vec<(BufferId, StoredMessage)>, String>,
+    },
+    Buffers {
+        client: crate::bus::ClientId,
+        result: Result<Vec<BufferRow>, String>,
+    },
 }
 
 /// What one ingest produced, reported after commit.
@@ -187,6 +177,24 @@ enum Job {
         client: crate::bus::ClientId,
         request: havoc_ipc::RequestId,
         reply: tokio::sync::mpsc::Sender<SearchOutcome>,
+    },
+    /// A backlog window. Rides the same queue behind the same flush barrier,
+    /// so a window sees the line that landed a millisecond ago exactly as
+    /// search does. Fire-and-forget like Search.
+    Backlog {
+        buffer: BufferId,
+        anchor: Anchor,
+        limit: u32,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
+    },
+    /// Enumerate every buffer, for the attach-time announcement. No client can
+    /// ask for this — §4.7 forbids "give me the buffer" and §4.5 makes the
+    /// buffer set something the core *announces* instead.
+    ListBuffers {
+        client: crate::bus::ClientId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
     },
     /// The write path: fire-and-forget; the outcome arrives on the tokio
     /// sender after the batch commits.
@@ -301,6 +309,36 @@ impl StorageClient {
             request,
             reply,
         })
+    }
+
+    /// Fire-and-forget backlog window, behind the same flush barrier search
+    /// uses. The window arrives on `reply` as a [`ReadOutcome::Backlog`].
+    pub fn backlog(
+        &self,
+        buffer: BufferId,
+        anchor: Anchor,
+        limit: u32,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
+    ) -> Result<(), StorageError> {
+        self.send(Job::Backlog {
+            buffer,
+            anchor,
+            limit,
+            client,
+            request,
+            reply,
+        })
+    }
+
+    /// Fire-and-forget buffer enumeration for one attaching session.
+    pub fn list_buffers(
+        &self,
+        client: crate::bus::ClientId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
+    ) -> Result<(), StorageError> {
+        self.send(Job::ListBuffers { client, reply })
     }
 
     pub fn ensure_buffer(

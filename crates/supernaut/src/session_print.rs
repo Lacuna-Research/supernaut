@@ -51,6 +51,9 @@ pub(crate) fn print_event(state: &mut SessionState, event: &Event) {
                 hits.len()
             );
             for hit in hits {
+                // The newest hit per buffer is what `backlog <b> around-hit`
+                // jumps to.
+                state.last_hits.insert(hit.buffer, hit.seq);
                 println!(
                     "hit buffer={} seq={} nick={} text={}",
                     hit.buffer.0,

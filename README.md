@@ -1,6 +1,6 @@
 # Supernaut
 
-![stage 1 progress](https://img.shields.io/badge/stage%201-8%2F12-blue)
+![stage 1 progress](https://img.shields.io/badge/stage%201-9%2F12-blue)
 
 A terminal IRC client for people who want the client to already be good, not to
 become good after three weekends of configuration.
@@ -69,7 +69,7 @@ answer search and backlog requests — driven by a debug CLI, no UI yet.
 | 6 | Live connection, TLS, and reconnect | ✅ done |
 | 7 | Message ingestion, identity, and batched writes | ✅ done |
 | 8 | Full-text search | ✅ done |
-| 9a | Windowed backlog | ⬜ todo |
+| 9a | Windowed backlog | ✅ done |
 | 9b | Read markers and verb hardening | ⬜ todo |
 | 10a | Network config file | ⬜ todo |
 | 10b | Credentials and the stage acceptance run | ⬜ todo |

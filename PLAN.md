@@ -172,7 +172,11 @@ genuinely is.
    `search` command against a seeded corpus.
 9. **Windowed backlog and read markers.** `FetchBacklog` with all four anchors
    including `AroundSearchHit`, limit capped server-side regardless of the request
-   (§4.7, §6.3); `last_read_seq` set/read per buffer. Still no "give me the buffer".
+   (§4.7, §6.3); `last_read_seq` set/read per buffer. Still no "give me the buffer"
+   — and, added at prompt 9a, the other half of §4.5's attach contract: the core
+   *announces* the buffer set to each attaching client (a replay of
+   `BufferCreated` on that session's lane), so a client over a data dir an
+   earlier process wrote can resolve buffers no event of its own introduced.
 10. **Network config and credentials.** TOML config for networks/nick/autojoin as seed
     data; `keyring` with encrypted-file fallback for SASL secrets — never plaintext in
     the config file (§5.8). Ends with the stage acceptance run driven from config

@@ -2,6 +2,7 @@
 //! §4.2 and its naming amendment (Supernaut app, havoc engine).
 
 mod session;
+mod session_backlog;
 mod session_print;
 mod wiring;
 
