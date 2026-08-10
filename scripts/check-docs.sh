@@ -36,7 +36,7 @@ CATEGORY_LIMIT=3
 # Add a line when a stage opens. Do not remove finished stages — their carry-forward,
 # status and retrospective checks still have to hold.
 STAGES=(
-	"1:STAGE-1-PROMPTS.md:10"
+	"1:STAGE-1-PROMPTS.md:12"
 	# "2:STAGE-2-PROMPTS.md:18"
 )
 

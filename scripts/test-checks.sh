@@ -40,7 +40,7 @@ build_repo() {
 	cp "$TEMPLATE_ROOT/scripts/measure-ratchets.sh" scripts/
 	chmod +x scripts/*.sh
 	# The fixture stage is 3 prompts; the template default is a placeholder.
-	sed -i.bak 's|"1:STAGE-1-PROMPTS.md:10"|"1:STAGE-1-PROMPTS.md:3"|' scripts/check-docs.sh
+	sed -i.bak 's|"1:STAGE-1-PROMPTS.md:12"|"1:STAGE-1-PROMPTS.md:3"|' scripts/check-docs.sh
 	rm scripts/check-docs.sh.bak
 
 	seq 1 50 | sed 's/^/rule /' >CLAUDE.md
