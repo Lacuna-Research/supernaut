@@ -5,3 +5,6 @@
 # Local check-failure telemetry (see CLAUDE.md). Per-machine by design: CI never
 # writes it, and tracking it would make every clone's ledger fight the others'.
 discipline-stats.txt
+
+# Rust build artifacts.
+/target/

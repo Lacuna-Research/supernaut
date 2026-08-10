@@ -104,6 +104,11 @@ and gets a decision entry.
 - **Retention policy.** *(not blocking)* Default "never delete", but a vacuum/archive
   story is owed (NORTH-STAR §9). Nothing in the schema forecloses it. Settle by stage 6
   item 3 (release), where it becomes a documented user promise.
+- **License.** *(not blocking)* The public repo currently ships no license, and the
+  Cargo manifests deliberately omit the `license` field — prompt 1's review caught the
+  field landing as a silent decision and it was stripped. Genuinely the user's call
+  (MIT OR Apache-2.0 is the Rust-ecosystem default). Must be settled by stage 6 item 3
+  (Release): the field plus LICENSE texts land together.
 
 ### Testing strategy
 

@@ -1,0 +1,11 @@
+[package]
+name = "havoc-core"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+havoc-ipc.workspace = true

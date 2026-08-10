@@ -298,3 +298,56 @@ honest; everything unchecked in it (features, ethos) is deliberately timeless pr
 that does not go stale per-prompt.
 **Revisit if:** the badge/table upkeep is repeatedly forgotten and CI-caught —
 that is the signal to automate the bump in a hook rather than to remove the claims.
+
+## Prompt 1 — Workspace scaffold and build discipline
+
+**Commit:** PR #4 (squash)  **Date:** 2026-08-09
+
+**Shipped:** the five-crate cargo workspace with the §4.2 edges declared, workspace
+lints (`warnings = "deny"`, clippy all-deny), real Makefile bodies, `/target`
+ignored, and an observable `supernaut` binary printing name + version. CI's build job
+un-skips itself from this PR on (its guard keyed on the placeholder text).
+
+**Deviations:** `make fmt` formats in place rather than the prompt's literal
+`--check` mapping; the `--check` moved into `make lint`, which CI actually runs
+(`make build test lint`) — the prompt's mapping would have left rustfmt unenforced in
+CI. Crate doc comments run three lines, not one — the §4.2 pointer plus the naming
+amendment does not fit one honest line. Rust toolchain installed on this machine via
+Homebrew rustup (stable 1.97.1) as part of this prompt.
+
+**Deferred:** licensing — the review caught `license = "MIT OR Apache-2.0"` landing
+as a silent decision in workspace metadata; stripped, now a Still-open item on
+PLAN.md aimed at stage 6 Release, where the field and LICENSE texts land together.
+
+**Learned:** `[workspace.lints.rust] warnings = "deny"` plus per-crate
+`[lints] workspace = true` puts warnings-as-errors in the repo rather than the shell,
+which survives any CI or contributor environment; and `unused_crate_dependencies` is
+allow-by-default, so empty placeholder edges compile without underscore-import
+ceremony — the first draft's `use havoc_core as _;` lines were cargo-cult and the
+review flagged them.
+
+**Measured:** clean `make build` of the empty workspace: 0.8s. 313-line diff before
+review fixes.
+
+**Live run:** `cargo run -p supernaut` prints `supernaut 0.1.0` and exits 0; `make
+build`, `make test`, `make lint` (fmt --check + clippy -D warnings), and `make check`
+all green locally on stable 1.97.1. CI green is confirmed on the PR itself.
+
+**Review:** three fence violations found and fixed — a personality tagline in
+`main.rs` (the prompt's own fence: personality done twice is done badly), `pub use
+havoc_ipc as ipc` aliases in three crates (API surface beyond "minimal lib.rs", and
+they would have let call sites blur which crate owns the wire vocabulary), and the
+unasked-for `license` field (stripped; see Deferred). Kept over the reviewer's
+objection: `[workspace.lints.clippy] all = "deny"` (standing clippy-strict rule in
+CLAUDE.md; the Makefile's `-D warnings` is deliberate belt-and-suspenders), and the
+three-line doc comments (recorded as deviation instead). Adopted: the missing
+prompt-outcome block the queue file's tail comment prescribes — now appended under
+prompt 1.
+
+**Carry-forward raised:** on prompt 4 — the line-transport trait cannot live in
+havoc-transport (core has no edge to it; define the trait in havoc-core or
+havoc-ipc). On prompt 5 — no core↔transport Cargo edge exists in either direction;
+wire through the binary or add the edge deliberately with the boundary-check
+amendment. Both from the review harvest. Rejected from the harvest: an alias-path
+warning for prompt 2 (moot once the aliases were deleted) and a license-texts note
+for stage 6 (superseded by the Still-open item).

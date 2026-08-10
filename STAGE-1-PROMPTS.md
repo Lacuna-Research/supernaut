@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 0/10 complete. Next: prompt 1.
+**Status:** 1/10 complete. Next: prompt 2.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -100,6 +100,12 @@ banner/ASCII personality (stage 2's theme work — personality done twice is don
 badly). Do not touch scripts/check-docs.sh beyond what the adaptation checklist
 already did.
 ```
+
+**Status:** complete. Shipped as ordered except: `make fmt` formats in place with the
+`--check` moved into `make lint` (deviation recorded in `BUILD-LOG.md`), and the
+review stripped a personality tagline, three `pub use` aliases, and the `license`
+manifest field (now a Still-open item). Nothing left untested — the workspace is
+empty scaffolding by design.
 
 ---
 
@@ -240,6 +246,15 @@ backoff (prompt 6), or implement CHATHISTORY resync (stage 5 — the seam is
 enough).
 ```
 
+### Carry-forward
+
+- From prompt 1: **the line-transport trait cannot live in havoc-transport.**
+  `crates/havoc-core/Cargo.toml` declares havoc-ipc as core's only dependency, and
+  core → havoc-transport would be a new §4.2 edge the boundary check in
+  `scripts/check-docs.sh` does not permit. Define the trait the actor codes against
+  in havoc-core (or havoc-ipc) from the outset; do not sketch it into
+  havoc-transport and discover the missing edge mid-session.
+
 ---
 
 ## Prompt 5 — Event bus, request handler, and debug CLI
@@ -264,6 +279,15 @@ of anything seen (prompt 7), or CBOR framing on the transport (stage 4 — in-pr
 typed messages, no serialization).
 
 *To be written out before it starts.*
+
+### Carry-forward
+
+- From prompt 1: **no Cargo edge exists between havoc-core and havoc-transport, in
+  either direction.** Both depend only on havoc-ipc (see their `Cargo.toml`s); only
+  the `supernaut` binary depends on both. Either shape the wiring so core exposes
+  plain channels and `supernaut` adapts them to havoc-transport's trait, or add the
+  edge deliberately — with the `scripts/check-docs.sh` boundary-check amendment and
+  its fixtures in the same change — not as a mid-session surprise.
 
 ---
 
