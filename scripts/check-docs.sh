@@ -507,19 +507,45 @@ check_boundary "$SOURCE_DIR/havoc-core/Cargo.toml" ratatui crossterm termion ter
 check_boundary "$SOURCE_DIR/havoc-transport/Cargo.toml" rusqlite ratatui crossterm irc-proto
 
 # havoc-ipc is the inverse: near-zero deps, so it is an allowlist, not a blocklist.
-# Anything beyond serde/time/bitflags means a type or concern is leaking into the
-# wire-format crate that belongs in core or transport.
+# Anything beyond serde/bitflags means a type or concern is leaking into the
+# wire-format crate that belongs in core or transport (time was removed from the cap
+# by the prompt-2 decision: ServerTime owns a raw i64). The cap covers the *shipped*
+# graph — [dependencies], target-specific ones, and [build-dependencies], which
+# compile and run on a user's machine — but not [dev-dependencies], which never
+# reach a user's build (prompt 2 hit this: ciborium as a test-only dep is exactly
+# what the acceptance's "plus dev-deps" allows).
+runtime_deps_of() {
+	awk '
+		/^\[/ {
+			if (match($0, /^\[(target\.[^]]*\.)?(build-)?dependencies\.[A-Za-z0-9_-]+\]/)) {
+				name = $0
+				sub(/.*dependencies\./, "", name)
+				sub(/\].*/, "", name)
+				print name
+				in_deps = 0
+			} else {
+				in_deps = ($0 ~ /^\[(target\.[^]]*\.)?(build-)?dependencies\]/)
+			}
+			next
+		}
+		in_deps && /^[A-Za-z0-9_-]+[[:space:]]*[=.]/ {
+			split($0, a, /[[:space:]=.]/)
+			print a[1]
+		}
+	' "$1" | sort -u
+}
+
 if [ -f "$SOURCE_DIR/havoc-ipc/Cargo.toml" ]; then
-	IPC_ALLOWLIST=" serde time bitflags "
+	IPC_ALLOWLIST=" serde bitflags "
 	ipc_extra=""
-	for d in $(deps_of "$SOURCE_DIR/havoc-ipc/Cargo.toml"); do
+	for d in $(runtime_deps_of "$SOURCE_DIR/havoc-ipc/Cargo.toml"); do
 		case "$IPC_ALLOWLIST" in
 		*" $d "*) ;;
 		*) ipc_extra="$ipc_extra $d" ;;
 		esac
 	done
 	if [ -n "$ipc_extra" ]; then
-		err "havoc-ipc declares${ipc_extra} — it is capped at serde/time/bitflags (NORTH-STAR.md §4.2). Wire types stay near zero-dep."
+		err "havoc-ipc declares${ipc_extra} — it is capped at serde/bitflags (NORTH-STAR.md §4.2 + the prompt-2 time decision). Wire types stay near zero-dep."
 	else
 		ok "havoc-ipc stays near zero-dep"
 	fi

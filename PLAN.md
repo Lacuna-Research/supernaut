@@ -78,16 +78,6 @@ The blocking annotation is machine-read: `*(blocking: prompt 5)*` or
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
-- **Buffer identity across networks — is `#rust` on two networks one buffer or two?**
-  *(blocking: prompt 3)* NORTH-STAR §9 leans "two", and the §4.9 sketch
-  (`UNIQUE(network_id, name)`) already implies it, but merged-view is a foreseeable
-  request and the schema hardens at prompt 3. Decide, and record whether a future
-  merged view is a client/query-side projection — if it is, the schema stays untouched
-  and this never reopens.
-- **Migration mechanism: `refinery` or hand-rolled versioned SQL?** *(blocking:
-  prompt 3)* NORTH-STAR §4.9 explicitly leaves this open. `refinery` is a dependency
-  (allowlist + decision entry); hand-rolled is a hundred lines we own forever. Must be
-  settled where migrations are born.
 - **SASL mechanism set for stage 1.** *(blocking: prompt 4)* §2.3 promises SASL as the
   standard path *and* CertFP supported; §8 M1 says only "SASL". PLAIN-over-TLS only,
   or PLAIN + EXTERNAL from the start? The mechanism-selection shape in the state
@@ -209,6 +199,14 @@ Covers NORTH-STAR §8 M3.
    viewport. Its own module, property-tested over random resize sequences (§6.7).
 3. **Scrollback viewport and message rendering.** Scrollback over the cache and the
    windowed backlog API; dense, loud, differentiated-by-kind formatting (§2.1).
+
+   ### Carry-forward
+   - From stage 1 prompt 2: **the time-crate debt lands here.** The havoc-ipc
+     dependency decision (BUILD-LOG.md, 2026-08-09) deferred `time` until something
+     formats timestamps for display; `ServerTime::as_unix_millis` in
+     `crates/havoc-ipc/src/lib.rs` is the sole accessor. Adding `time` to
+     supernaut-tui needs its own decision entry, and must not grow comparison
+     helpers around `ServerTime` — its no-ordering rule is deliberate.
 4. **Buffer list, activity, and switching.** Buffer list with activity/highlight state
    from core; switching; unread positioning from read markers.
 5. **Input widget and command line.** Composer (client-authoritative while typing,
@@ -251,6 +249,14 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
    model (§4.8); requests and events multiplexed on one connection.
 2. **Capability handshake.** Feature lists exchanged, intersection operated on; no
    version lockstep (§4.8). The constants live in `havoc-ipc`.
+
+   ### Carry-forward
+   - From stage 1 prompt 2: **serde tolerance covers unknown struct fields only —
+     unknown enum variants are decode errors.** `unknown_struct_fields_are_tolerated`
+     in `crates/havoc-ipc/tests/roundtrip.rs` is the entire proven evolution story;
+     adding a variant to `Event`/`RequestBody` breaks any older peer at decode. The
+     handshake must gate *variants*, not just features, behind `havoc_ipc::caps`
+     constants, and never send a variant outside the negotiated intersection.
 3. **Daemon and attach modes.** `supernaut --daemon` / `supernaut --connect <path>`
    (whether the daemon additionally brands as `havocd` is decided here); socket
    lifecycle and orphan cleanup; detach loses nothing, attach renders from buffers +
