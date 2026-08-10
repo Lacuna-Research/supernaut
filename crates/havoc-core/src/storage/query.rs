@@ -22,8 +22,19 @@ const SEARCH_MAX_HITS: usize = 100;
 const BACKLOG_MAX_LIMIT: usize = 200;
 
 /// The column list every message-row read shares, so [`hydrate`] can index
-/// positionally without each query restating the order.
+/// positionally without each query restating the order — restating it is how a
+/// reorder desynchronizes the two silently. Interpolated, so the search join can
+/// qualify it with its table alias.
 const MESSAGE_COLUMNS: &str = "buffer_id, seq, kind, nick, text, server_time, tags";
+
+/// [`MESSAGE_COLUMNS`] qualified for a query that joins `message` as `m`.
+fn message_columns_as(alias: &str) -> String {
+    MESSAGE_COLUMNS
+        .split(", ")
+        .map(|column| format!("{alias}.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
 
 /// One `message` row exactly as SQLite hands it over.
 type RawRow = (
@@ -81,9 +92,8 @@ pub(super) fn run_search(
     conn: &Connection,
     spec: &SearchSpec,
 ) -> Result<Vec<(BufferId, StoredMessage)>, String> {
-    let mut stmt = conn
-        .prepare(
-            "SELECT m.buffer_id, m.seq, m.kind, m.nick, m.text, m.server_time, m.tags
+    let sql = format!(
+        "SELECT {}
              FROM message_fts
              JOIN message m
                ON m.buffer_id = message_fts.buffer_id AND m.seq = message_fts.seq
@@ -95,8 +105,9 @@ pub(super) fn run_search(
                AND (?5 IS NULL OR m.server_time < ?5)
              ORDER BY rank
              LIMIT ?6",
-        )
-        .map_err(|e| e.to_string())?;
+        message_columns_as("m")
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(
             rusqlite::params![
@@ -148,8 +159,9 @@ pub(super) fn run_backlog(
         return Err(format!("unknown buffer {}", buffer.0));
     }
 
-    // The single site that decides how many rows any window may bind, so every
-    // later caller inherits the cap.
+    // Every anchor below is served by `scan`, the one function that binds a SQL
+    // LIMIT, and it is handed this already-capped number — so no anchor, and no
+    // later caller, can widen the window.
     let limit = (limit as usize).min(BACKLOG_MAX_LIMIT);
     match anchor {
         Anchor::Latest => scan(conn, buffer, "<=", Seq(i64::MAX), true, limit),

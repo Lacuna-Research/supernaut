@@ -133,6 +133,10 @@ fn backlog_around_a_vanished_seq_returns_its_neighbours() {
         // A second connection, only to punch the hole the API cannot: the
         // write path is append-only by design.
         let conn = rusqlite::Connection::open(dir.join("h.db")).expect("open");
+        // The storage thread owns the same file; wait for it rather than
+        // failing, so a future batch timer cannot make this flaky.
+        conn.busy_timeout(std::time::Duration::from_millis(5_000))
+            .expect("busy timeout");
         conn.execute(
             "DELETE FROM message WHERE buffer_id = ?1 AND seq = 5",
             [buffer.0],

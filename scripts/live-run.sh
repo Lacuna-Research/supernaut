@@ -386,6 +386,9 @@ printf 'ok    search wall time %ss over the %s-commit corpus (recorded, not asse
 assert "$WORK/a.out" 'backlog request=[0-9]* buffer=[0-9]* count=5' 'after:0 returned a five-line window'
 assert "$WORK/a.out" 'line buffer=[0-9]* seq=1 ' 'the after:0 window starts at seq=1, ascending'
 assert "$WORK/a.out" 'backlog request=[0-9]* buffer=[0-9]* count=200' 'the engine capped a 9999-row window at 200'
+# The arithmetic, so a future change to #flood's traffic is diagnosable: "flood
+# line 250" sits at seq 252 (A's join is seq 1, carol's join seq 2, then the 500
+# lines), and limit 7 splits 3 before / 3 after — hence 247 and 253 exactly.
 assert "$WORK/a.out" 'line .*text=flood line 250' 'around-hit centred on the search hit'
 assert "$WORK/a.out" 'line .*text=flood line 247' 'around-hit carried three lines before the hit'
 assert "$WORK/a.out" 'line .*text=flood line 253' 'around-hit carried three lines after the hit'

@@ -1208,6 +1208,34 @@ the room the accumulated verb/drain hardening needs.
   a `send` acknowledged by dispatch may never have gone out. Decide here
   whether "sent" needs an actor-side outcome or a documented at-most-once
   caveat, before the TUI composer inherits it.
+- From prompt 9a: **the replay task and `try_direct` fight over the same
+  64-slot lane, and search still awaits it.** `Bus::try_direct`
+  (`crates/havoc-core/src/bus.rs`) drops the lane on Full, while the
+  announcement task (`crates/havoc-core/src/core/reads.rs`, `announce`)
+  deliberately fills it — up to one message per buffer against
+  `mpsc::channel(64)`. `handle_search_outcome` still `.await`s `bus.direct`, so
+  a client that awaits a Response without draining events can be deadlocked by
+  a replay it never asked for; and a replay task parked on a wedged lane holds
+  its Sender clone indefinitely, making the Full-drop outcome nondeterministic
+  (zombie vs loud-kill). Decide the fate of both awaits together, and add the
+  >64-buffer attach as the test (a bare `Session` with no pump over a
+  65-buffer store, then a `FetchBacklog`).
+- From prompt 9a: **`wait backlog` is response-counting and `wait search` is
+  event-counting, in one struct.** `SessionState` carries both
+  `backlog_pending`/`backlog_count` and the older `search_count`
+  (`crates/supernaut/src/session.rs`); when fixing `wait search`, replace
+  `search_count` with the `backlog_pending` pattern rather than adding a
+  parallel one — and the response counter must stay BEFORE the body match in
+  `handle_incoming` or errors go back to being invisible.
+- From prompt 9a: **live-run.sh's announcement proof depends on "the deployment
+  failed" being inside `#supernaut`'s last five rows.** Session D reads
+  `backlog #supernaut latest 5`; any traffic a mark-read segment adds to A's
+  #supernaut before quit silently pushes the line out of the window, and the
+  failure reads as "announcement broke". Anchor D's read (`after:0`, or a larger
+  limit) before adding #supernaut traffic.
+- From prompt 9a: **`SetReadMarker` still answers "SetReadMarker arrives in
+  prompt 9".** `crates/havoc-core/src/core.rs` — fix the string as part of
+  replacing the arm.
 
 ---
 
@@ -1245,6 +1273,17 @@ references a password in any version, not an unsplit prompt.
 - From prompt 6 (config half): **`--tls-ca` and `NetworkSettings.security`
   are installed base.** The TOML schema must own per-network `tls_ca`, and the
   loopback-only plaintext rule needs a new home once config supplies the host.
+- From prompt 9a: **the announcement resolves buffers by network name and
+  silently collapses duplicates.** `announce` in
+  `crates/havoc-core/src/core/reads.rs` builds `HashMap<&str, NetworkId>` from
+  `state.settings`; two configured networks sharing a `name` mean every buffer
+  of one is announced under the other's NetworkId, with no error. Make `name`
+  uniqueness a validated config invariant, not an assumption inside `announce`.
+- From prompt 9a: **live-run.sh's session D hard-codes `--host localhost` solely
+  because the network name is `debug-<host>`.** That same-host coupling is what
+  makes A's rows resolvable to D; when config becomes the authority for network
+  names, switch that segment to the config file in the same commit, or the
+  announcement proof passes (or fails) for the wrong reason.
 
 ---
 

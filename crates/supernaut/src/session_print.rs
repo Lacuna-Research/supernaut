@@ -51,9 +51,12 @@ pub(crate) fn print_event(state: &mut SessionState, event: &Event) {
                 hits.len()
             );
             for hit in hits {
-                // The newest hit per buffer is what `backlog <b> around-hit`
-                // jumps to.
-                state.last_hits.insert(hit.buffer, hit.seq);
+                // The *newest* hit per buffer is what `backlog <b> around-hit`
+                // jumps to, so keep the greatest seq — hits arrive in rank
+                // order, not seq order. Never cleared: across searches, the
+                // newest hit ever seen for a buffer wins.
+                let newest = state.last_hits.entry(hit.buffer).or_insert(hit.seq);
+                *newest = (*newest).max(hit.seq);
                 println!(
                     "hit buffer={} seq={} nick={} text={}",
                     hit.buffer.0,

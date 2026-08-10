@@ -1306,3 +1306,90 @@ the announcement exists so that a window can be *asked for* over a data dir this
 process did not write, and the live proof of one is the live proof of the other.
 382 of the lines are tests, all ordered by the prompt. The live run was never a
 candidate for trimming.
+
+## Prompt 9a — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 9a entry above; PR #14, second commit
+
+Appended rather than edited into that entry, deliberately: the entry is already
+committed and pushed, so revising it in place trips `log-append-only` on the
+staged diff — and "correct in a new entry" is what the rule asks for. Prompt 8's
+review addendum set the same shape.
+
+**Shipped:** five fixes from the review. (1) The one flatly-unmet order
+requirement: `Event::BufferCreated` now carries the doc comment stating its
+announced meaning — "this buffer exists and you did not know it", fires on
+creation *and* on attach-time replay, receivers must treat it as idempotent.
+Reusing the variant was always going to restate its meaning, and the reason for
+not renaming it is that a rename is a wire break; leaving the restatement
+undocumented would have made the decision unfindable from the type. Doc-only, so
+still no wire change. (2) `run_search` restated the column list by hand while
+`MESSAGE_COLUMNS`' comment claimed every message-row read shared it — it now
+interpolates the constant (qualified with the join's alias via
+`message_columns_as`), so a reorder cannot silently desynchronize the positional
+`hydrate`; and the comment claiming `run_backlog` is "the single site that binds
+the SQL LIMIT" now says what is true — `scan` binds it, `run_backlog` caps the
+number handed to it. (3) `last_hits` inserted in *rank* order, so it held the
+last-by-relevance hit while two comments claimed newest; it now keeps the
+greatest seq per buffer, which makes the comments true and `around-hit` mean what
+it says. Uncleared by design: across searches, the newest hit ever seen for a
+buffer wins. (4) The gap test's second connection sets `busy_timeout` (5s) before
+its DELETE, so future batch-timer work cannot make it flaky. (5) The 247/253 live
+assertions are kept — they are what proves centring — with the arithmetic written
+above them (the hit is at seq 252 because two join rows precede the flood; limit 7
+splits 3/3), so anyone who changes #flood's traffic diagnoses the failure instead
+of doubting the feature. Plus eleven carry-forward notes landed (below). The
+entry's `**Oversize:**` figures become 1456 changed lines in crates/, 391 of them
+tests, with these fixes.
+
+**Learned:** the `last_hits` bug is the useful one — the code was defensible and
+the *comment* was the defect, twice, which is the failure mode a reviewer catches
+and a test never would (any single-hit search passes either way; the live run's
+`around-hit` worked because `in:#flood "flood line 250"` returns exactly one hit).
+Also mechanical, and worth not relearning: **splitting a prompt's work across two
+local commits makes `make check` fail on the second one.** The pre-commit hook
+compares staged-vs-HEAD, so an in-place edit to a build-log entry that is already
+committed reads as a rewrite, and the entry's Shipped/Learned/Live-run sections
+are no longer in the *added* lines. CI compares against the base ref and is green
+either way. Two honest routes exist — squash the branch to one commit, or append
+an addendum as here — and force-pushing a PR branch is not always available.
+
+**Live run:** `scripts/live-run.sh` re-run after these fixes, since two of them
+are on live paths (`last_hits` and `run_search`'s SQL): **35/35, exit 0** — the
+third green run of this prompt.
+
+**Review:** the review's highest finding is **deferred to 9b by design**: the
+announcement task and `try_direct` contend for the same 64-slot lane while
+`handle_search_outcome` still awaits `bus.direct`, so a client that awaits a
+Response without draining events can be deadlocked by a replay it never asked
+for, and a task parked on a wedged lane makes the Full-drop outcome
+nondeterministic (zombie vs loud-kill). That is exactly the conversion this
+prompt's text named as 9b's, for the reason it gave — "what does half a delivered
+pair mean" has to be answered before search's ordered pair moves off `direct` —
+and answering it here would have been the second seam the 9a/9b split exists to
+avoid. It goes to 9b with the >64-buffer attach named as its test. The ungated
+`FetchBacklog` (a client can read, and enumerate by probing ids, buffers the
+announcement deliberately withheld — the skip is advisory, not a boundary) is
+harmless under single-user filesystem auth and becomes a real question when the
+socket makes clients plural, so it is a stage-4 note. Two liberties are
+**accepted as they stand**: `Anchor::Latest` binding `seq <= i64::MAX` as a
+sentinel rather than branching the SQL (one parameter shape for all four anchors
+is worth more than the purity), and the CLI's optional anchor with a default
+`limit` of 50 (a debug-harness convenience the wire never sees). Nothing else was
+left unaddressed.
+
+**Carry-forward raised:** eleven proposals from the harvest, all adopted, none
+rejected — four to prompt 9b (the replay/`try_direct` lane collision and search's
+await; `wait search` converting to the response-counting pattern rather than
+growing a parallel one; live-run's session-D window being anchored before
+#supernaut gains traffic; the stale "SetReadMarker arrives in prompt 9" string),
+two to prompt 10a (network `name` uniqueness becoming a validated config
+invariant rather than an assumption inside `announce`; session D's `--host`
+coupling switching to config in the same commit), three to PLAN stage 4
+(`FetchBacklog`'s lost exactly-one-Response guarantee needing a wire story; the
+advisory skip; `BACKLOG_MAX_LIMIT` being deliberately undiscoverable and owed by
+the handshake as a negotiated *value*), one to PLAN stage 2 (a `Backlog` response
+can name a buffer before its `BufferCreated` arrives — the mirror of the existing
+ordering note), and one to PLAN stage 6 (`last_read_seq` is already a *read*-path
+value handed to every attaching client, so per-client markers change
+`run_list_buffers` too).
