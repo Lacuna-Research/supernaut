@@ -452,10 +452,10 @@ expect pass "allowlisted dependencies pass, in every declaration form"
 
 # --- 18. Crate boundaries (NORTH-STAR §4.2) --------------------------------
 build_repo
-mkdir -p crates/havoc-tui
-cat >crates/havoc-tui/Cargo.toml <<'EOF'
+mkdir -p crates/supernaut-tui
+cat >crates/supernaut-tui/Cargo.toml <<'EOF'
 [package]
-name = "havoc-tui"
+name = "supernaut-tui"
 
 [dependencies]
 ratatui = "0.29"
@@ -463,18 +463,18 @@ rusqlite = "0.32"
 EOF
 log_entry
 stage_all
-expect fail "rusqlite declared in havoc-tui fails" "forbidden by the crate boundaries"
+expect fail "rusqlite declared in supernaut-tui fails" "forbidden by the crate boundaries"
 
-cat >crates/havoc-tui/Cargo.toml <<'EOF'
+cat >crates/supernaut-tui/Cargo.toml <<'EOF'
 [package]
-name = "havoc-tui"
+name = "supernaut-tui"
 
 [dependencies]
 ratatui = "0.29"
 crossterm = "0.28"
 EOF
 stage_all
-expect pass "terminal deps in havoc-tui pass"
+expect pass "terminal deps in supernaut-tui pass"
 
 build_repo
 mkdir -p crates/havoc-core

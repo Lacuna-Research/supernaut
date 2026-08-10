@@ -70,13 +70,14 @@ prompt, make build/test/fmt/lint run actual cargo commands and CI's build job ru
 instead of skipping.
 
 - Create a cargo workspace with five crates under crates/: havoc-ipc, havoc-core,
-  havoc-tui, havoc-transport, and havoc (binary). Minimal lib.rs each (main.rs for
-  the binary), with a one-line doc comment per crate stating what it owns, pointing
-  at NORTH-STAR §4.2.
+  supernaut-tui, havoc-transport, and supernaut (binary). Minimal lib.rs each
+  (main.rs for the binary), with a one-line doc comment per crate stating what it
+  owns, pointing at NORTH-STAR §4.2 and its naming amendment (Supernaut app,
+  havoc engine).
 - Declare the §4.2 dependency edges now, while the crates are empty: havoc-core,
-  havoc-tui, and havoc-transport each depend on havoc-ipc; havoc depends on all
-  four. The mechanical boundary check on Cargo.toml files needs real edges to
-  guard, and adding them later invites adding them wrong.
+  supernaut-tui, and havoc-transport each depend on havoc-ipc; supernaut depends
+  on all four. The mechanical boundary check on Cargo.toml files needs real edges
+  to guard, and adding them later invites adding them wrong.
 - No external dependencies in this prompt. The allowlist gets its first entries in
   prompt 2, each with its decision entry.
 - Replace the Makefile's placeholder build/test/fmt/lint bodies: cargo build
@@ -85,12 +86,13 @@ instead of skipping.
   errors too (workspace lints in the root Cargo.toml, so the flag travels with the
   repo rather than the shell). Keep check, check-tests, and hooks untouched.
 - Add /target to .gitignore.
-- Give havoc's main something observable: print name + version and exit 0. A
-  placeholder, but it makes `cargo run -p havoc` a real smoke test from day one.
+- Give supernaut's main something observable: print name + version and exit 0. A
+  placeholder, but it makes `cargo run -p supernaut` a real smoke test from day
+  one.
 
 Acceptance: from a fresh clone, make build, make test, make fmt, make lint, and
-make check all pass; cargo run -p havoc prints the name/version line and exits 0;
-CI's build job executes and is green.
+make check all pass; cargo run -p supernaut prints the name/version line and
+exits 0; CI's build job executes and is green.
 
 Do not: add wire types (prompt 2 — the protocol surface deserves its own session
 and review), add any dependency (prompt 2 onward, decision entry each), or add
@@ -170,14 +172,14 @@ dedicated thread — before any messages exist to store.
   seq) WITHOUT ROWID; the partial unique index on (buffer_id, msgid); the
   (buffer_id, server_time) index. No FTS table yet — prompt 8 adds it as a
   migration, which is precisely why migrations exist before data does.
-- The havoc binary opens the store at startup (default XDG data dir, --data-dir
-  override) and prints the schema version, so migration behavior is observable
-  from outside a test.
+- The supernaut binary opens the store at startup (default XDG data dir,
+  --data-dir override) and prints the schema version, so migration behavior is
+  observable from outside a test.
 - Tests: migrations create the schema on an empty file and are a no-op on a
   current one; a smoke insert/read through the storage-thread channel; an
   assertion on the exact schema shape, so drift from §4.9 is loud.
 
-Acceptance: run havoc twice against a fresh --data-dir — the first run creates
+Acceptance: run supernaut twice against a fresh --data-dir — the first run creates
 the DB and reports the migration, the second reports up-to-date; sqlite3
 '.schema' shows the §4.9 shape; make check green.
 
@@ -247,7 +249,7 @@ enough).
 
 Wire the core together and give it its first driver: the event bus (broadcast to every
 attached client), request dispatch with correlation ids, the client/core trait plus
-in-process mpsc impl in `havoc-transport`, and a debug CLI in the `havoc` binary that
+in-process mpsc impl in `havoc-transport`, and a debug CLI in the `supernaut` binary that
 drives the core over the typed boundary — connect, join, send, tail events. Live
 connect is plain TCP to a **local ergo only**, behind a loud explicit flag (§2.3's
 opt-in); this is the prompt that creates `scripts/live-run.sh`, and the project's first

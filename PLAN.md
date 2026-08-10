@@ -1,4 +1,4 @@
-# HAVOC — Build Plan
+# Supernaut — Build Plan
 
 A terminal IRC client: headless core owning connections/history/state, Ratatui frontend
 owning only the viewport, one binary with embedded and daemon modes. **`NORTH-STAR.md`
@@ -16,16 +16,18 @@ each stage ends at a point where the thing is genuinely usable.
 ### Module layout
 
 The crate graph *is* the architecture (NORTH-STAR §4.2). The forbidden edges are
-enforced by a mechanical check on `Cargo.toml` files, not by review. If `havoc-tui`
-ever needs a type living in `havoc-core`, the type moves to `havoc-ipc`.
+enforced by a mechanical check on `Cargo.toml` files, not by review. If
+`supernaut-tui` ever needs a type living in `havoc-core`, the type moves to
+`havoc-ipc`. Naming (NORTH-STAR amendment, 2026-08-09): **Supernaut** is the app and
+everything user-facing; **havoc** is the headless engine family.
 
 | Crate | Responsibility | I/O? |
 |---|---|---|
 | `havoc-ipc` | Wire types: requests, responses, events, IDs, buffer/network models; protocol version + capability constants | none |
 | `havoc-core` | Connection actors, cap negotiation, SQLite storage, event bus, request handling, config | network + disk |
-| `havoc-tui` | Rendering, input handling, layout, theme, viewport state | terminal only |
+| `supernaut-tui` | Rendering, input handling, layout, theme, viewport state | terminal only |
 | `havoc-transport` | Framing and transport impls (in-process mpsc, UDS later); the trait both sides code against | sockets; no business logic |
-| `havoc` | Binary: arg parsing, wiring, mode selection | — |
+| `supernaut` | Binary: arg parsing, wiring, mode selection | — |
 
 ### Key technical choices
 
@@ -102,9 +104,6 @@ and gets a decision entry.
 - **Retention policy.** *(not blocking)* Default "never delete", but a vacuum/archive
   story is owed (NORTH-STAR §9). Nothing in the schema forecloses it. Settle by stage 6
   item 3 (release), where it becomes a documented user promise.
-- **The name.** *(not blocking)* `havoc` is a placeholder (NORTH-STAR header). Must be
-  settled before stage 6 item 3 — by then it touches binary names, the socket path,
-  config/data dirs, and the crate prefix, all listed there.
 
 ### Testing strategy
 
@@ -196,7 +195,7 @@ history instantly with filters, and can kill and restart the process losing noth
 
 Covers NORTH-STAR §8 M3.
 
-1. **Embedded-mode wiring and event loop.** `havoc` runs core + TUI in one process over
+1. **Embedded-mode wiring and event loop.** `supernaut` runs core + TUI in one process over
    the in-process transport; render loop rebuilds each tick from a local projection of
    core events (§4.10); input becomes typed requests. No shortcut embedded mode can
    take that attached mode could not (§4.3).
@@ -243,11 +242,12 @@ Covers NORTH-STAR §8 M5. The stage-level budget is itself the acceptance test: 
 is not a few hundred lines, stop and reexamine stage 1 (§5.4).
 
 1. **UDS transport and CBOR framing.** `LengthDelimitedCodec` + `ciborium` over a Unix
-   socket at `$XDG_RUNTIME_DIR/havoc/core.sock`, filesystem permissions as the auth
+   socket at `$XDG_RUNTIME_DIR/supernaut/core.sock`, filesystem permissions as the auth
    model (§4.8); requests and events multiplexed on one connection.
 2. **Capability handshake.** Feature lists exchanged, intersection operated on; no
    version lockstep (§4.8). The constants live in `havoc-ipc`.
-3. **Daemon and attach modes.** `havoc --daemon` / `havoc --connect <path>`; socket
+3. **Daemon and attach modes.** `supernaut --daemon` / `supernaut --connect <path>`
+   (whether the daemon additionally brands as `havocd` is decided here); socket
    lifecycle and orphan cleanup; detach loses nothing, attach renders from buffers +
    read markers alone (§4.5).
 
@@ -285,9 +285,10 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
    (`mlua`, §5.7), plain-IRC listener (§7.9), inline images (§7.5), OSC 8/52 niceties
    (§7.4), stats (§7.7), live theme reload (§7.8). Each choice gets a decision entry
    and its own numbered item here before any prompt exists.
-3. **The rename and release.** Settle the name; rename binary, socket path, config/data
-   dirs, crate prefix; banner and personality (§2.1); packaging, docs, distribution;
-   the retention-policy answer documented as a user promise.
+3. **Release.** Banner and personality (§2.1); packaging, docs, distribution; the
+   retention-policy answer documented as a user promise. (The name is settled —
+   Supernaut, with havoc as the headless engine; NORTH-STAR amendment 2026-08-09 —
+   so no rename pass is owed here.)
 
 ---
 
