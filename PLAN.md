@@ -73,8 +73,10 @@ here, whatever `BUILD-LOG.md` entry first raised it — that log is append-only,
 questions buried in it are questions nobody finds. Delete an item from this list when it
 is answered, and record the answer as a decision entry.
 
-The blocking annotation is machine-read: `*(blocking: prompt 5)*` or
-`*(blocking: stage 2 prompt 5)*`, or `*(not blocking)*`. `make check` refuses to let a
+The blocking annotation is machine-read: `*(blocking: prompt N)*` or
+`*(blocking: stage 2 prompt 5)*`, or `*(not blocking)*`. (The first example is
+deliberately not a literal prompt number — the checker greps this file, and a
+documentation example must not block a real prompt.) `make check` refuses to let a
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
@@ -298,8 +300,15 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
 2. **From the §7 menu, as separate items when chosen.** Candidates: scripting host
    (`mlua`, §5.7), plain-IRC listener (§7.9), inline images (§7.5), OSC 8/52 niceties
    (§7.4), stats (§7.7), live theme reload (§7.8), SASL EXTERNAL / CertFP (§2.3's
-   "CertFP supported" promise — the mechanism slot exists in the state machine per
-   the 2026-08-10 SASL decision; needs client-cert plumbing in rustls + keyring). Each choice gets a decision entry
+   "CertFP supported" promise — needs client-cert plumbing in rustls + keyring).
+
+   ### Carry-forward
+   - From stage 1 prompt 4: **the SASL "mechanism slot" is shape only —
+     `begin_sasl` in `crates/havoc-core/src/connection/caps.rs` consults
+     `mechanisms.first()` and failure is terminal.** EXTERNAL does not "drop in":
+     it requires mechanism iteration, per-mechanism fallback semantics, and
+     RPL_SASLMECHS (908) handling. Budget that machine work into the item; do not
+     plan against the slot working as-is. Each choice gets a decision entry
    and its own numbered item here before any prompt exists.
 3. **Release.** Banner and personality (§2.1); packaging, docs, distribution; the
    retention-policy answer documented as a user promise. (The name is settled —

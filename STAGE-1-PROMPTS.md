@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 3/10 complete. Next: prompt 4.
+**Status:** 4/10 complete. Next: prompt 5.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -267,20 +267,15 @@ backoff (prompt 6), or implement CHATHISTORY resync (stage 5 — the seam is
 enough).
 ```
 
-### Carry-forward
-
-- From prompt 1: **the line-transport trait cannot live in havoc-transport.**
-  `crates/havoc-core/Cargo.toml` declares havoc-ipc as core's only dependency, and
-  core → havoc-transport would be a new §4.2 edge the boundary check in
-  `scripts/check-docs.sh` does not permit. Define the trait the actor codes against
-  in havoc-core (or havoc-ipc) from the outset; do not sketch it into
-  havoc-transport and discover the missing edge mid-session.
-- From prompt 2: **the wire connection state is a 3-variant projection, not the
-  state machine.** `ConnectionPhase` in `crates/havoc-ipc/src/lib.rs` has only
-  Connecting/Registered/Disconnected; this machine has ~8 states plus the reconnect
-  seam. Map internal states onto the coarse enum at the actor's boundary —
-  exporting the real state enum through havoc-ipc, or widening `ConnectionPhase`
-  mid-session, is a wire change under `PROTOCOL_VERSION`.
+**Status:** complete. Shipped sans-I/O rather than trait-plus-fake — the machine is
+a pure lines-in/lines-out function and the transcript tables *are* the scripted
+transport; the actor loop and transport seam move wholesale to prompt 5 (deviation
+recorded, constraint restated in that prompt's notes). Fail-closed SASL semantics
+(`State::Failed`) added beyond the order, with the reasoning logged. The review
+caught a real protocol bug — CAP NEW mid-negotiation escaped the CAP END gate —
+fixed with its transcript. Six carry-forward notes raised (prompts 5, 6, 7; stage
+6). Live run: N/A by design — no I/O exists; prompt 5 is where this machine first
+touches a socket.
 
 ---
 
@@ -327,6 +322,21 @@ typed messages, no serialization).
   lands as Events" — connect/join/send success is only observable by tailing
   correlated events. Design the CLI's command flow around the event stream, not
   the reply.
+- From prompt 4: **the line-transport trait was never built — the machine is a
+  sync pure function and there is no actor yet.** `Machine::handle_line(&str) ->
+  Vec<String>` in `crates/havoc-core/src/connection/mod.rs` is the entire seam
+  (deliberate sans-I/O deviation, recorded in the log). This prompt creates the
+  actor loop and the transport seam wholesale — and inherits the prompt-1
+  constraint the deleted note carried: no Cargo edge between havoc-core and
+  havoc-transport in either direction; any line-transport trait lives in
+  havoc-core or havoc-ipc.
+- From prompt 4: **`handle_line` returns outbound lines only — state changes
+  and received messages are silent.** Emitting `ConnectionState` events means
+  diffing `Machine::phase()` after every line or widening the return type, and
+  the nine-transcript corpus in `crates/havoc-core/tests/state_machine.rs`
+  asserts on exactly `Vec<String>` — widening churns it all. Also `phase()`
+  folds `State::Failed`'s reason away; a CLI that must print why a connection
+  died needs that surfaced. Decide the shape in the prompt text.
 - From prompt 3: **supernaut's `main` is open-print-exit behind a closed arg
   grammar.** `data_dir_from_args` in `crates/supernaut/src/main.rs` rejects
   everything except `--data-dir`, which is prompt 3's documented acceptance
@@ -352,6 +362,21 @@ prompt feeds.
 same connect path; splitting them means two prompts editing one function. Revisit if
 the SASL Still-open decision put EXTERNAL/CertFP in scope — that would justify its own
 session.
+
+### Carry-forward
+
+- From prompt 4: **the transcript corpus is inline Rust, not the fixture files
+  PLAN promised.** The corpus is `Step(&str, &[&str])` tables in
+  `crates/havoc-core/tests/state_machine.rs`. "Capture live transcripts into this
+  corpus" means either generating Rust from captures or migrating to data files
+  first — pick one in the prompt text, or capture produces a second, divergent
+  corpus format.
+- From prompt 4: **`phase()` folds `Failed` and `Disconnected` together — a
+  backoff loop keyed on the phase retries fatal SASL failures forever.**
+  Reconnect policy must read `Machine::state()` and treat `State::Failed`
+  (fail-closed SASL) as no-retry. There is also no re-arm path: `on_disconnect`
+  only marks state and `Machine::start` builds a fresh machine — reconstruct per
+  attempt; do not add a `reset()` mid-session.
 
 Do not: CHATHISTORY resync on reconnect (stage 5 — nothing exists to merge into yet),
 storage writes (prompt 7), or any TCP listener/inbound anything (§2.4, stage 6 menu at
@@ -404,6 +429,14 @@ scenarios beyond what ergo can produce today (stage 5 tests against a real bounc
   bridge (async facade over the job channel, or `spawn_blocking`) in the prompt
   text, not when the flood test hangs. Also: the flood harness owns `PRAGMA
   synchronous` tuning — `Storage::open` deliberately leaves it at the default.
+- From prompt 4: **the machine parses and then discards every non-protocol
+  message — ingestion cannot tap it.** `handle_message` in
+  `crates/havoc-core/src/connection/mod.rs` drops PRIVMSG/NOTICE/JOIN, and the
+  parse happens inside `handle_line`, so the actor cannot reach the parsed
+  `irc_proto::Message` (tags included) without parsing twice. Decide in the
+  prompt text whether the actor parses once and feeds the machine a `&Message`,
+  or the machine grows a message output — either restructures the prompt-4 API,
+  and the seam choice may pull forward into prompt 5's actor design.
 - From prompt 3: **`message.tags` is declared CBOR on disk, but havoc-core has no
   CBOR dependency.** `crates/havoc-core/migrations/0001_init.sql` commits the
   column; ciborium is only havoc-ipc's dev-dep. Writing tags means a runtime
