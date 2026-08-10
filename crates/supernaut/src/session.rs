@@ -13,10 +13,11 @@ use havoc_core::connection::io::Security;
 use havoc_core::connection::{SaslConfig, SaslCredentials, SaslMechanism};
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::Storage;
-use havoc_ipc::{BufferId, ConnectionPhase, Event, NetworkId, Request, RequestBody, RequestId};
+use havoc_ipc::{BufferId, ConnectionPhase, NetworkId, Request, RequestBody, RequestId};
 use havoc_transport::{ClientTransport, InProcess, Incoming, TransportError};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
+use crate::session_print::print_event;
 use crate::wiring;
 
 #[derive(clap::Args, Debug)]
@@ -128,12 +129,13 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
     result
 }
 
-struct SessionState {
-    transport: InProcess,
-    next_request: u64,
-    buffers: HashMap<String, BufferId>,
-    msg_counts: HashMap<BufferId, u64>,
-    phase: Option<ConnectionPhase>,
+pub(crate) struct SessionState {
+    pub(crate) transport: InProcess,
+    pub(crate) next_request: u64,
+    pub(crate) buffers: HashMap<String, BufferId>,
+    pub(crate) msg_counts: HashMap<BufferId, u64>,
+    pub(crate) search_count: u64,
+    pub(crate) phase: Option<ConnectionPhase>,
 }
 
 async fn drive(transport: InProcess) -> Result<(), String> {
@@ -142,6 +144,7 @@ async fn drive(transport: InProcess) -> Result<(), String> {
         next_request: 1,
         buffers: HashMap::new(),
         msg_counts: HashMap::new(),
+        search_count: 0,
         phase: None,
     };
 
@@ -169,6 +172,18 @@ async fn drive(transport: InProcess) -> Result<(), String> {
 
 /// Returns Ok(false) on `quit`.
 async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, String> {
+    // `search` takes the raw remainder — whitespace-splitting would destroy
+    // the quoting the core-side grammar depends on.
+    if let Some(rest) = command.strip_prefix("search ") {
+        request(
+            state,
+            RequestBody::Search {
+                query: rest.trim().to_owned(),
+            },
+        )
+        .await?;
+        return Ok(true);
+    }
     let mut parts = command.split_whitespace();
     match parts.next() {
         None => Ok(true),
@@ -227,6 +242,11 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
                     rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1),
                     rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(10),
                 ),
+                "search" => (
+                    None,
+                    rest.first().and_then(|s| s.parse().ok()).unwrap_or(1),
+                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(10),
+                ),
                 _ => (None, 1, 10),
             };
             wait(state, &target, name, count, secs).await?;
@@ -269,10 +289,11 @@ async fn wait(
                 .get(n)
                 .is_some_and(|id| state.msg_counts.get(id).copied().unwrap_or(0) >= count)
         }),
+        "search" => state.search_count >= count,
         _ => true,
     };
-    if !matches!(target, "registered" | "buffer" | "message") {
-        println!("error - wait knows 'registered', 'buffer', and 'message'");
+    if !matches!(target, "registered" | "buffer" | "message" | "search") {
+        println!("error - wait knows 'registered', 'buffer', 'message', and 'search'");
         return Ok(());
     }
 
@@ -320,57 +341,6 @@ fn handle_incoming(
             Ok(())
         }
         Err(TransportError::Closed) => Err("transport closed".to_owned()),
-    }
-}
-
-fn print_event(state: &mut SessionState, event: &Event) {
-    match event {
-        Event::ConnectionState {
-            network,
-            phase,
-            detail,
-        } => {
-            let phase_str = match phase {
-                ConnectionPhase::Connecting => "connecting",
-                ConnectionPhase::Registered => "registered",
-                ConnectionPhase::Disconnected => "disconnected",
-            };
-            state.phase = Some(*phase);
-            match detail {
-                Some(detail) => println!(
-                    "event connection-state network={} phase={phase_str} detail={detail}",
-                    network.0
-                ),
-                None => println!(
-                    "event connection-state network={} phase={phase_str}",
-                    network.0
-                ),
-            }
-        }
-        Event::BufferCreated { buffer } => {
-            state.buffers.insert(buffer.name.clone(), buffer.id);
-            println!(
-                "event buffer-created buffer={} network={} name={}",
-                buffer.id.0, buffer.network.0, buffer.name
-            );
-        }
-        Event::MessageAdded { message } => {
-            *state.msg_counts.entry(message.buffer).or_default() += 1;
-            println!(
-                "event message-added buffer={} seq={}",
-                message.buffer.0, message.seq.0
-            );
-        }
-        Event::SearchResults { request, hits } => {
-            println!(
-                "event search-results request={} hits={}",
-                request.0,
-                hits.len()
-            );
-        }
-        Event::ReadMarkerChanged { buffer, seq } => {
-            println!("event read-marker buffer={} seq={}", buffer.0, seq.0);
-        }
     }
 }
 

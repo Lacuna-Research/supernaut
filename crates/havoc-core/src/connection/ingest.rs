@@ -140,7 +140,7 @@ pub(crate) fn parse_server_time(value: &str) -> Option<ServerTime> {
 
 /// Howard Hinnant's `days_from_civil`: days since 1970-01-01, proleptic
 /// Gregorian.
-fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
+pub(crate) fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     let y = if month <= 2 { year - 1 } else { year };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;

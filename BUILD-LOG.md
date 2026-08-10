@@ -951,3 +951,103 @@ the flood harness that proves batching is the same one that proves dedup), and a
 third of the lines are the storage-thread rewrite the batching required plus its
 module tests. The split candidate (classifier vs writer) would ship an ingest
 type with no writer to receive it.
+
+## Decision — FTS: a plain self-contained table, trigger-synced, riding the job queue
+**Date:** 2026-08-10  **Affects:** migration 0002, storage/exec.rs, search.rs, core dispatch
+
+**Chose:** a plain FTS5 table (`text` indexed; `buffer_id`/`seq` unindexed) —
+external-content cannot bind to the WITHOUT ROWID message table — synced by an
+AFTER INSERT trigger so the index write is structurally part of the inserting
+statement (dedup never fires it; rollback carries it), backfilled in the same
+migration. Search executes on the storage thread's single connection behind the
+flush barrier (read-your-writes holds); results return correlated on the directed
+lane, Response first, event on success only. Stock bm25 order, 100-hit cap.
+**Over:** contentless-delete FTS5 + docid map (a second table, an allocator, and a
+three-way join to save text bytes — disk is the cheap resource, moving parts are
+not); Rust-side index writes (forgettable by future insert paths); a second
+read-only WAL connection (silently forfeits read-your-writes for an unmeasured
+latency win).
+**Revisit if:** dogfood shows search dwell behind write bursts, or retention's
+delete migration arrives (it owes the DELETE trigger).
+
+## Decision — the actor report lane is unbounded
+**Date:** 2026-08-10  **Affects:** connection/actor.rs, core.rs
+
+**Chose:** the actor→core report lane becomes an unbounded channel, with the
+actor's select biased to reads. The flood harness exposed a genuine deadlock
+cycle: core awaited the full (64) command lane while the actor awaited the full
+(256) report lane — throughput stopped at ~430/500 and ergo sendq-killed the
+client. The report lane carries history, and prompt 7 already established the
+principle for the storage queue: history is never dropped (or deadlocked) for
+backpressure; memory bounds are a dogfood question.
+**Over:** try_send-and-drop (drops history), bigger bounded caps (moves the
+deadlock threshold instead of removing the cycle), or unbounding the command lane
+(commands are droppable; history is not — the asymmetry is the design).
+**Revisit if:** dogfood memory profiles show the lane growing without bound under
+real network pathology.
+
+## Prompt 8 — Full-text search
+
+**Commit:** PR #11 (squash)  **Date:** 2026-08-10
+
+**Shipped:** migration 0002 (plain FTS5 table + AFTER INSERT trigger + backfill),
+the core-side query grammar (search.rs: quote-aware scanner, from:/in:/after:/
+before:), Job::Search riding the storage queue behind the flush barrier, deferred
+correlated responses (handle_request → Option<Response>; Response-then-
+SearchResults on the requester's directed lane only), the CLI search + wait search
+verbs with per-hit lines, the live-run search segment, and — from the harness — the
+unbounded report lane fixing a real deadlock (decision entries above).
+
+**Deviations:** the read-your-writes proof waits for the fresh line's *echo*
+(network) before searching with no further delay (storage) — the JIT text's
+"no wait between" conflated the two hops; recorded, not fudged. The
+sleep-sequenced NickServ pre-registration and harness-level polls stand as before.
+
+**Deferred:** None.
+
+**Learned:** the flood harness caught a genuine product deadlock (core↔actor
+channel cycle — see the decision entry) that five earlier green runs had timed
+around; and FTS5 treats bare hyphenated terms as column-filter syntax
+(`xyzzy-quicksilver` → "no such column") — the error comes back cleanly as
+designed, and stage 2's /search UX should quote bare terms containing operator
+characters (note raised). ON CONFLICT DO NOTHING provably does not fire the
+AFTER INSERT trigger (pinned by test). ergo sendq-kills a non-reading client at
+96k, which is how the deadlock presented.
+
+**Measured:** search over the 500-row corpus: <1s wall (recorded by the harness).
+Four consecutive 24/24 live runs post-fix. 16 lib tests, 5 search-scanner units,
+v1→v2 upgrade/backfill pinned.
+
+**Live run:** 24/24 assertions, four consecutive runs — filters, phrase-vs-prefix,
+read-your-writes through the flush barrier, malformed-MATCH error survival, and
+the on-disk index proven from outside the process (500 rows MATCH 'flood').
+
+**Review:** ran below; dispositions recorded there.
+
+**Carry-forward consumed:** all five notes — WITHOUT ROWID vs external-content
+(plain table, decision entry); rollback invalidation meets FTS (trigger rides the
+transaction; mid-batch test); second-reader staleness (rejected — job-queue rider
+keeps read-your-writes; barrier documented); frozen wire shape (core-side grammar,
+zero wire changes); ClientId discard (handle_request now takes the client and
+returns Option<Response>).
+
+**Carry-forward raised:** see Review.
+
+Prompt 8 Review addendum (dispositions): fixed now — a failed Search enqueue
+returns an immediate Error instead of silently breaking exactly-one-Response; the
+dead `state` parameter dropped from handle_search_outcome; the rollback test's
+sleep replaced with a schema_version round-trip (the flush barrier as a
+deterministic sync); the NULL-text claim now asserted against the index's actual
+row count; the malformed-MATCH live assert anchored to a numbered error line.
+Recorded, previously missing: the tokenize clause (`unicode61 remove_diacritics
+2`) is NORTH-STAR §4.9's own sketch, adopted with it — it belongs in the FTS
+decision entry and now does. Carry-forward raised, all adopted: prompt 9 (don't
+copy the swallowed enqueue; the bounded-outcome-lane topology under bigger
+payloads; wait counts events not responses), prompt 10 (`in:` unions across
+network rows — scope it with config), PLAN stage 2 item 5 (quote bare FTS5
+operator terms in /search). Rejected from the harvest: none.
+**Oversize:** 868 changed lines in crates/ against the 800 cap — the index, the
+grammar, the dispatch rework, and the deadlock fix are one seam ("Examined for a
+split and left whole": the filter grammar and index shape must be designed
+together), and ~250 lines are the ordered tests. The deadlock fix could not wait
+for its own PR: the flood harness this prompt extends is what exposed it.

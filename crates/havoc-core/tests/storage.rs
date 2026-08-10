@@ -52,16 +52,16 @@ fn migrations_create_then_noop() {
         report,
         MigrationReport {
             from_version: 0,
-            to_version: 1
+            to_version: 2
         }
     );
-    assert_eq!(report.applied(), 1);
-    assert_eq!(storage.client().schema_version().expect("version"), 1);
+    assert_eq!(report.applied(), 2);
+    assert_eq!(storage.client().schema_version().expect("version"), 2);
     drop(storage);
 
     let (storage, report) = Storage::open(&path, false).expect("second open");
     assert_eq!(report.applied(), 0, "reopening must be a no-op");
-    assert_eq!(storage.client().schema_version().expect("version"), 1);
+    assert_eq!(storage.client().schema_version().expect("version"), 2);
 }
 
 /// Drift from the §4.9 shape must be loud: assert the exact schema.
@@ -82,8 +82,28 @@ fn schema_matches_north_star() {
     names.sort();
     assert_eq!(
         names,
-        ["buffer", "message", "msg_msgid", "msg_time", "network"]
+        [
+            "buffer",
+            "message",
+            "message_fts",
+            "message_fts_config",
+            "message_fts_content",
+            "message_fts_data",
+            "message_fts_docsize",
+            "message_fts_idx",
+            "msg_msgid",
+            "msg_time",
+            "network"
+        ]
     );
+    let trigger: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND name = 'message_ai'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("trigger present");
+    assert_eq!(trigger, 1, "the FTS sync trigger must exist");
 
     let sql_of = |name: &str| -> String {
         conn.query_row(

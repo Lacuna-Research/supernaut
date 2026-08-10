@@ -46,7 +46,11 @@ pub struct ActorSpawn {
     pub port: u16,
     pub security: Security,
     pub config: Config,
-    pub reports: mpsc::Sender<(NetworkId, ActorReport)>,
+    /// Unbounded, deliberately (the storage queue's own argument): this lane
+    /// carries history, and an actor blocking on a full report lane while the
+    /// core blocks on a full command lane is a deadlock cycle — observed live
+    /// as the flood stalling at ~430/500 and ergo sendq-killing the client.
+    pub reports: mpsc::UnboundedSender<(NetworkId, ActorReport)>,
     /// `>>`/`<<` raw-line trace to stderr — the capture the corpus harvests.
     pub trace: bool,
 }
@@ -107,9 +111,7 @@ async fn run(params: ActorSpawn, mut commands: mpsc::Receiver<ActorCommand>) {
     let report_phase = |phase, detail: Option<String>| {
         let reports = reports.clone();
         async move {
-            let _ = reports
-                .send((network, ActorReport::Phase { phase, detail }))
-                .await;
+            let _ = reports.send((network, ActorReport::Phase { phase, detail }));
         }
     };
 
@@ -161,7 +163,7 @@ struct AttemptSpec<'a> {
     security: &'a Security,
     config: Config,
     network: NetworkId,
-    reports: &'a mpsc::Sender<(NetworkId, ActorReport)>,
+    reports: &'a mpsc::UnboundedSender<(NetworkId, ActorReport)>,
     trace: bool,
 }
 
@@ -206,6 +208,11 @@ async fn attempt_once(
 
     loop {
         tokio::select! {
+            // Reads first, deliberately: a burst of outbound commands (the
+            // flood) must not starve the socket read side — an unread receive
+            // buffer backpressures the server's fan-out and stalls every
+            // channel member (observed live at ~440/500).
+            biased;
             line = transport.next_line() => {
                 let line = match line {
                     Ok(Some(line)) => line,
@@ -257,19 +264,20 @@ async fn attempt_once(
                     if machine.phase() == ConnectionPhase::Registered {
                         registered = true;
                     }
-                    let _ = reports
-                        .send((network, ActorReport::Phase {
+                    let _ = reports.send((
+                        network,
+                        ActorReport::Phase {
                             phase: machine.phase(),
                             detail: None,
-                        }))
-                        .await;
+                        },
+                    ));
                 }
 
                 // The same parse feeds history. Buffer creation rides
                 // ingestion (our confirmed JOIN arrives as a Join message);
                 // our_join and JoinedChannel are gone.
                 if let Some(item) = ingest::classify(&parsed, machine.nick(), now_millis()) {
-                    let _ = reports.send((network, ActorReport::Message(item))).await;
+                    let _ = reports.send((network, ActorReport::Message(item)));
                 }
             }
             command = commands.recv() => {

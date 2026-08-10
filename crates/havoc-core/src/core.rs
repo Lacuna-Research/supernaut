@@ -19,7 +19,7 @@ use crate::bus::{Bus, ClientId, Directed};
 use crate::connection::actor::{self, ActorCommand, ActorReport, ActorSpawn};
 use crate::connection::io::Security;
 use crate::connection::{Config as ConnectionConfig, Networks};
-use crate::storage::{IngestOutcome, NetworkRow, StorageClient};
+use crate::storage::{IngestOutcome, NetworkRow, SearchOutcome, StorageClient};
 
 /// Everything needed to reach one configured network. Flags today, config
 /// file at prompt 10.
@@ -99,8 +99,9 @@ struct CoreState {
     buffers: HashMap<BufferId, (NetworkId, String)>,
     networks: Networks,
     trace: bool,
-    reports_tx: mpsc::Sender<(NetworkId, ActorReport)>,
+    reports_tx: mpsc::UnboundedSender<(NetworkId, ActorReport)>,
     outcome_tx: mpsc::Sender<IngestOutcome>,
+    search_tx: mpsc::Sender<SearchOutcome>,
 }
 
 async fn run(
@@ -111,8 +112,9 @@ async fn run(
     mut requests: mpsc::Receiver<(ClientId, Request)>,
     mut attach: mpsc::Receiver<(ClientId, mpsc::Sender<Directed>)>,
 ) {
-    let (reports_tx, mut reports) = mpsc::channel::<(NetworkId, ActorReport)>(256);
+    let (reports_tx, mut reports) = mpsc::unbounded_channel::<(NetworkId, ActorReport)>();
     let (outcome_tx, mut outcomes) = mpsc::channel::<IngestOutcome>(1024);
+    let (search_tx, mut searches) = mpsc::channel::<SearchOutcome>(64);
     let mut state = CoreState {
         storage,
         settings,
@@ -122,6 +124,7 @@ async fn run(
         trace,
         reports_tx,
         outcome_tx,
+        search_tx,
     };
 
     loop {
@@ -130,8 +133,9 @@ async fn run(
                 bus.register(client, lane);
             }
             Some((client, request)) = requests.recv() => {
-                let response = handle_request(&mut state, request).await;
-                bus.direct(client, Directed::Response(response)).await;
+                if let Some(response) = handle_request(&mut state, client, request).await {
+                    bus.direct(client, Directed::Response(response)).await;
+                }
             }
             Some((network, report)) = reports.recv() => {
                 handle_report(&mut state, &mut bus, network, report);
@@ -139,12 +143,21 @@ async fn run(
             Some(outcome) = outcomes.recv() => {
                 handle_outcome(&mut state, &bus, outcome);
             }
+            Some(search) = searches.recv() => {
+                handle_search_outcome(&mut bus, search).await;
+            }
             else => return,
         }
     }
 }
 
-async fn handle_request(state: &mut CoreState, request: Request) -> Response {
+/// `None` means the response is deferred (search: the exactly-one-Response
+/// contract promises one response, not an instant one).
+async fn handle_request(
+    state: &mut CoreState,
+    client: crate::bus::ClientId,
+    request: Request,
+) -> Option<Response> {
     let id = request.id;
     let body = match request.body {
         RequestBody::Connect { network } => connect(state, network).await,
@@ -170,10 +183,73 @@ async fn handle_request(state: &mut CoreState, request: Request) -> Response {
             None => error(format!("unknown buffer {}", buffer.0)),
         },
         RequestBody::FetchBacklog { .. } => error("FetchBacklog arrives in prompt 9".to_owned()),
-        RequestBody::Search { .. } => error("Search arrives in prompt 8".to_owned()),
+        RequestBody::Search { query } => match crate::search::parse(&query) {
+            Err(message) => error(message),
+            Ok(spec) => {
+                // A failed enqueue must not swallow the one promised
+                // Response (reviewer catch).
+                match state
+                    .storage
+                    .search(spec, client, id, state.search_tx.clone())
+                {
+                    Ok(()) => return None,
+                    Err(e) => error(format!("storage unavailable: {e}")),
+                }
+            }
+        },
         RequestBody::SetReadMarker { .. } => error("SetReadMarker arrives in prompt 9".to_owned()),
     };
-    Response { id, body }
+    Some(Response { id, body })
+}
+
+/// Response first (Ack, or the SQLite error for a malformed MATCH — user
+/// input never hangs and is never swallowed), then the correlated hits on
+/// the directed lane only. Errors get no event.
+async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome) {
+    let SearchOutcome {
+        client,
+        request,
+        result,
+    } = outcome;
+    match result {
+        Err(message) => {
+            bus.direct(
+                client,
+                Directed::Response(Response {
+                    id: request,
+                    body: ResponseBody::Error { message },
+                }),
+            )
+            .await;
+        }
+        Ok(rows) => {
+            bus.direct(
+                client,
+                Directed::Response(Response {
+                    id: request,
+                    body: ResponseBody::Ack,
+                }),
+            )
+            .await;
+            let hits = rows
+                .into_iter()
+                .map(|(buffer, m)| havoc_ipc::Message {
+                    buffer,
+                    seq: m.seq,
+                    kind: m.kind,
+                    nick: m.nick,
+                    text: m.text.unwrap_or_default(),
+                    server_time: m.server_time,
+                    tags: m.tags,
+                })
+                .collect();
+            bus.direct(
+                client,
+                Directed::Event(Event::SearchResults { request, hits }),
+            )
+            .await;
+        }
+    }
 }
 
 async fn connect(state: &mut CoreState, network: NetworkId) -> ResponseBody {
