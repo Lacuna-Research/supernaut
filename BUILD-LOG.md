@@ -1051,3 +1051,53 @@ grammar, the dispatch rework, and the deadlock fix are one seam ("Examined for a
 split and left whole": the filter grammar and index shape must be designed
 together), and ~250 lines are the ordered tests. The deadlock fix could not wait
 for its own PR: the flood harness this prompt extends is what exposed it.
+
+## Decision — prompts 9 and 10 split into 9a/9b/10a/10b
+**Date:** 2026-08-10  **Affects:** STAGE-1-PROMPTS.md, scripts/check-docs.sh (STAGES), scripts/test-checks.sh, README.md, PLAN.md blocking annotation
+
+**Chose:** split the two remaining stage-1 prompts along their real seams —
+9a windowed backlog + the buffer-announcement decision (one read-path seam),
+9b read markers + the accumulated verb/drain hardening (quit drain, kind-aware
+counting, disconnected-command signalling), 10a the TOML config file with
+deliberately zero credential surface, 10b keyring credentials (deleting the env
+bridge) + the stage acceptance run. Labels, not renumbering — the status checker
+counts headings by position, which is exactly what the 13a/13b convention exists
+for. Stage total: 12. The seven notes that had piled onto prompt 9 distribute
+four/three; prompt 10's three notes split config-half/credentials-half.
+**Over:** leaving them whole (three of the last five PRs blew the 800-line
+tripwire — the trend, not any single breach, is the signal the cap exists to
+produce), or renumbering (churns every cross-reference for zero benefit).
+**Because:** the original prompt-10 fence argued the split ships the
+plaintext-password trap; the resolution is a config format that never holds or
+references a password in any version — 10a keeps SASL on the env bridge, 10b
+deletes it (replace, don't deprecate). The trap dies by construction, not by
+prompt size.
+**Revisit if:** 9a's announcement decision turns out to need marker state —
+nothing currently suggests it.
+
+**Carry-forward consumed:** none — the notes on prompts 9 and 10 were
+redistributed verbatim onto 9a/9b/10a/10b, not consumed; this section satisfies
+the mechanical pairing for the moved block headings.
+
+## Correction — merged branches were never deleted, eleven times
+**Date:** 2026-08-10  **Supersedes:** the working method's "squash-merge and delete the branch" as practiced in PRs #1–#11
+**Category:** convention-not-checked
+
+**Claimed:** every PR was squash-merged "and the branch deleted once CI is
+green" (CLAUDE.md working method; asserted implicitly in every prompt entry).
+**Actually:** all eleven branches survived, local and remote. `gh pr merge
+--delete-branch` was run from inside each prompt's worktree; deleting the local
+branch requires checking out main, which was held by the primary worktree, so gh
+aborted its entire branch-cleanup step — including the remote half — and the
+error was being filtered out of the merge output as noise. Removing a worktree
+never deletes its branch, so nothing downstream caught it. All eleven were
+verified merged (tree-identity at merge time, PR state) and deleted 2026-08-10.
+**Lesson:** a cleanup that runs from inside the thing being cleaned up will
+fail in ways the happy path never shows; and filtering an error message to
+reduce noise is how a recurring failure becomes invisible.
+
+**Not mechanizable because:** verifying remote-branch absence needs network and
+gh state, which pre-commit checks must not require. The procedural fix is in
+force instead: merges now delete the branch explicitly (`git push origin
+--delete` + local `-D`) after exiting the worktree, from the repo root, and the
+merge output is no longer filtered.

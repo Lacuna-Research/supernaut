@@ -80,9 +80,9 @@ documentation example must not block a real prompt.) `make check` refuses to let
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
-- **Config vs. runtime state.** *(blocking: prompt 10)* Where does "I joined this
+- **Config vs. runtime state.** *(blocking: prompt 10a)* Where does "I joined this
   channel manually" live — config file or database? (NORTH-STAR §9: leaning database,
-  config as seed only.) Prompt 10 ships the config file, so it settles here. Until
+  config as seed only.) Prompt 10a ships the config file, so it settles here. Until
   then, earlier prompts must not persist join state anywhere the answer would have to
   migrate; if one does, name the symbol on this item.
 - **Read marker reconciliation across attached clients.** *(not blocking)* Last-write-
@@ -178,7 +178,7 @@ genuinely is.
     the config file (§5.8). Ends with the stage acceptance run driven from config
     alone.
 
-Stage 1 is broken into 10 prompts in **`STAGE-1-PROMPTS.md`**, which is authoritative
+Stage 1 is broken into 12 prompts in **`STAGE-1-PROMPTS.md`**, which is authoritative
 for grouping, ordering, and status; each numbered item above is attached to exactly one
 prompt there. The prompt details are deliberately not duplicated here — two copies of
 one list drift, and the copy nobody edits is the one that gets read.

@@ -1,9 +1,11 @@
 # Stage 1 — The Prompts
 
-**Status:** 8/10 complete. Next: prompt 9.
+**Status:** 8/12 complete. Next: prompt 9a.
 
-<!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
-The line is machine-read; `make check` fails if they disagree. -->
+<!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
+The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
+were split into 9a/9b/10a/10b (2026-08-10 decision entry) — labels, not
+renumbering: the checker counts headings by position. -->
 
 Stage 1's work queue. Every numbered item in `PLAN.md`'s stage 1 is attached to exactly
 one prompt here. The grouping is by **shared seam**, not by theme — two items belong
@@ -931,51 +933,106 @@ further delay (storage). Four consecutive 24/24 live runs.
 
 ---
 
-## Prompt 9 — Windowed backlog and read markers
+## Prompt 9a — Windowed backlog
 
 **Item:** Windowed backlog and read markers.
-**Branch:** `prompt-09-backlog-read-markers`
+**Branch:** `prompt-09a-backlog`
 
-`FetchBacklog` for real: all four anchors including `AroundSearchHit`, `limit` capped
-server-side regardless of what the client asks (§6.3); read markers (`last_read_seq`)
-set and read per buffer, emitted as events; debug CLI `backlog` and `mark-read`
-commands. There is still no "give me the buffer" request — the fence of §4.7 holds
-here or nowhere.
+`FetchBacklog` for real: all four anchors including `AroundSearchHit`, `limit`
+capped server-side regardless of what the client asks (§6.3); a debug CLI
+`backlog` verb. There is still no "give me the buffer" request — the fence of
+§4.7 holds here or nowhere. This half also owns the buffer-announcement decision
+its notes demand: the first session ever driven against a populated store cannot
+resolve buffers no event introduced.
 
-**Examined for a split (backlog vs read markers) and left whole**, because read
-markers alone are a session only if multi-client reconciliation is in scope, and it is
-not (Still open; stage 6). Revisit if AroundSearchHit's context-window semantics turn
-out to need design work with prompt 8's hit shape.
-
-Do not: read-marker reconciliation between clients or `draft/read-marker` upstream
-(stage 6, blocked on the Still-open), pagination UI concepts (stage 2), or raising the
-server-side cap for any caller.
+**Split from the original prompt 9** (with read markers) to respect the 800-line
+tripwire: the backlog window and the announcement mechanism are one read-path
+seam; markers are a write-path seam with its own verb/drain hardening. Revisit if
+the announcement decision turns out to need marker state — nothing suggests it.
 
 *To be written out before it starts.*
 
 ### Carry-forward
 
-- From prompt 2: **backlog replies are a bare Vec — no has-more signal, no hit
-  marker.** `ResponseBody::Backlog { messages }` and `Anchor::AroundSearchHit(Seq)`
-  in `crates/havoc-ipc/src/lib.rs`: with `limit` capped server-side, a short Vec is
-  ambiguous between window-exhausted and history-start, and an around-hit window
-  carries no indication of where the hit sits. If this prompt needs either signal,
-  it is a wire change to a shipped type — settle that while writing the prompt
-  detail, not mid-session.
+- From prompt 8: **FetchBacklog will copy search's deferred-response shape —
+  don't copy its swallowed enqueue failure.** The Search arm in
+  `crates/havoc-core/src/core.rs` converts a failed storage send into an
+  immediate Error response; the backlog arm must do the same from the start.
+- From prompt 8: **the search-outcome path rebuilds a bounded-lane-behind-
+  blocking-send topology.** `Job::Search`'s reply rides the bounded (64)
+  `search_tx` via `blocking_send` while core awaits `bus.direct` — a client
+  not draining its directed lane can stall the storage thread behind one
+  reader. Backlog windows are bigger payloads on this same shape: decide the
+  read-side backpressure story in the prompt text (the never-block-history
+  asymmetry cuts differently for reads).
+- From prompt 8: **`wait search` counts success events only — errors are
+  invisible to it and die by timeout.** The `backlog` verb will copy the wait
+  grammar; the sync primitive it actually needs may be response-counting, not
+  event-counting.
+- From prompt 7: **a buffer that predates the core instance is never
+  announced.** `handle_outcome` in `crates/havoc-core/src/core.rs` broadcasts
+  BufferCreated only on first *creation*; restart over a populated data dir and
+  MessageAdded carries BufferIds no event introduced — the CLI's name→id
+  projection cannot resolve them and backlog verbs starve. Decide the
+  announcement mechanism (e.g. buffer-list replay on attach) in the prompt
+  text — the §4.7 fence still forbids "give me the buffer".
 
 ---
 
-## Prompt 10 — Network config and credentials
+## Prompt 9b — Read markers and verb hardening
+
+**Item:** Windowed backlog and read markers.
+**Branch:** `prompt-09b-read-markers`
+
+Read markers (`last_read_seq`) set and read per buffer, emitted as events, with a
+`mark-read` verb — plus the session-verb debts the notes below carry: a real
+drain on `quit`, kind-aware message counting, and the harness's contiguity check
+kept intact. No reconciliation between clients (stage 6, blocked on the
+Still-open) and no `draft/read-marker` upstream.
+
+**Split from the original prompt 9**: markers alone are small, which is exactly
+the room the accumulated verb/drain hardening needs.
+
+*To be written out before it starts.*
+
+### Carry-forward
+
+- From prompt 7: **`wait message` counts every MessageAdded kind (Joins
+  included), and the harness's contiguity assert lives in live-run.sh now.**
+  When the verbs grow their drain here, make counting kind-aware or asserts
+  exact — the dedup-consumes-no-seq invariant is policed by
+  `COUNT(*) == MAX(seq)` in the script; keep it that way.
+- From prompt 7: **`quit` (and stdin EOF) races in-flight requests — the
+  runtime drop discards everything still queued.** Carol's flood lost ~300
+  sends until the harness drained via her own echo count
+  (`crates/supernaut/src/session.rs` `drive()` returns and `main` drops the
+  runtime). Give quit a drain: wait for outstanding RequestIds to resolve, or
+  document at-most-once for fire-and-forget verbs.
+- From prompt 6: **commands issued while disconnected vanish with no signal.**
+  `ActorCommand`s are drained and dropped during the backoff sleep in
+  `crates/havoc-core/src/connection/actor.rs`, and nothing reports the drop —
+  a `send` acknowledged by dispatch may never have gone out. Decide here
+  whether "sent" needs an actor-side outcome or a documented at-most-once
+  caveat, before the TUI composer inherits it.
+
+---
+
+## Prompt 10a — Network config file
 
 **Item:** Network config and credentials.
-**Branch:** `prompt-10-config-credentials`
+**Branch:** `prompt-10a-config`
 
-The config file (TOML, §5.8): networks, nick, autojoin — as seed data, per whatever
-the config-vs-runtime-state Still-open decides (it blocks this prompt). Credentials
-via `keyring` where available with an encrypted-file fallback; never plaintext secrets
-in the config file, including for SASL (§5.8). The debug CLI runs from config alone,
-and the prompt ends with the stage-1 acceptance run: connect, join, log, kill,
-restart, search.
+The TOML config file (§5.8): networks (host, port, tls_ca, caller-assigned ids,
+stable names), nick, autojoin — as seed data, per whatever the
+config-vs-runtime-state Still-open decides (it blocks this prompt). The debug
+CLI runs from config alone for everything except credentials. **Deliberately no
+credential surface of any kind in this half**: SASL stays on the
+`SUPERNAUT_SASL_PASSWORD` env bridge until 10b replaces it — the original
+prompt's fence warned that config-without-credentials ships the
+plaintext-password trap, and the answer is a config format that never holds or
+references a password in any version, not an unsplit prompt.
+
+*To be written out before it starts.*
 
 ### Carry-forward
 
@@ -985,30 +1042,38 @@ restart, search.
   per host string — one channel name silently unions histories across
   networks. Decide scoping here, where config becomes the authority for
   network identity.
-- From prompt 6: **the `SUPERNAUT_SASL_PASSWORD` bridge and the
-  `--sasl`/`--tls-ca` flags are installed base this prompt must replace, not
-  extend.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads the
-  env var; `NetworkSettings.security` carries `{ server_name, ca_file }`. The
-  TOML schema must own per-network tls_ca and the SASL account; the keyring
-  path must delete the env var (replace, don't deprecate); and the
-  loopback-only plaintext rule needs a new home once config supplies the host.
 - From prompt 5: **the debug session hardcodes network identity that config must
   replace.** `const NETWORK: NetworkId = NetworkId(1)` in
   `crates/supernaut/src/session.rs`, and the storage network name is
   `debug-<host>` — `ensure_network` keys on name, so a reused data dir accretes
   one row per host string. Config becomes the authority for caller ids and
   stable names; decide whether `debug-*` rows are migrated or abandoned.
+- From prompt 6 (config half): **`--tls-ca` and `NetworkSettings.security`
+  are installed base.** The TOML schema must own per-network `tls_ca`, and the
+  loopback-only plaintext rule needs a new home once config supplies the host.
 
-**Examined for a split (config vs credentials) and left whole**, because config
-parsing without the credential story ships exactly the plaintext-password trap the
-north-star forbids — the two must land together or the insecure version becomes the
-installed base.
+---
 
-Do not: interactive first-run flow (stage 2 item 7 — it needs a TUI), theme
-configuration (stage 2 item 6), or multi-network config surface beyond what the
-schema already permits (stage 5 item 1 — one network is stage 1's scope).
+## Prompt 10b — Credentials and the stage acceptance run
+
+**Item:** Network config and credentials.
+**Branch:** `prompt-10b-credentials`
+
+Credentials done right: `keyring` where available with an encrypted-file
+fallback; the config references an account name only; **the
+`SUPERNAUT_SASL_PASSWORD` env bridge is deleted** (replace, don't deprecate) —
+never plaintext secrets in the config file, ever (§5.8). Ends with the stage-1
+acceptance run: connect to a real network from config alone, join, log, kill,
+restart, search — the "Done when" of the stage, driven end to end.
 
 *To be written out before it starts.*
+
+### Carry-forward
+
+- From prompt 6 (credentials half): **the env bridge must be deleted, not kept
+  alongside.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads
+  `SUPERNAUT_SASL_PASSWORD`; the keyring path replaces both, and fixture
+  credentials in the harness must stay recognisably fake (CLAUDE.md).
 
 ---
 
