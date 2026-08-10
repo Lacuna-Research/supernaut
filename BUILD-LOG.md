@@ -452,3 +452,93 @@ fire-and-forget), prompt 7 (msgid has no berth on wire Message — ingest type
 needed), prompt 8 (search wire shape frozen), prompt 9 (Backlog Vec has no
 has-more/hit-marker), stage 2 item 3 (time-crate debt), stage 4 item 2 (variant
 intolerance). Rejected from the harvest: none.
+
+## Decision — SASL for stage 1: PLAIN over TLS, mechanism slot shaped for EXTERNAL
+**Date:** 2026-08-10  **Affects:** prompt 4 (state machine), PLAN.md Still open, stage 6 item 2
+
+**Chose:** stage 1 implements exactly one SASL mechanism — PLAIN, over TLS only —
+but the state machine's mechanism selection is an ordered preference list with
+per-mechanism states, so EXTERNAL (CertFP) is a new list entry later, not a
+reshaping. EXTERNAL/CertFP lands as a stage 6 menu candidate, where client-cert
+plumbing (rustls client auth + keyring storage) exists to support it.
+**Over:** implementing PLAIN + EXTERNAL both in stage 1.
+**Because:** the question's real worry was the *shape* — a machine designed around
+one mechanism hardcodes it. Designing the shape for many costs a list and an enum;
+implementing EXTERNAL costs client-cert configuration, storage, and UX that stage 1
+has nowhere to put (config and keyring arrive in prompt 10; TLS in prompt 6). §2.3's
+"CertFP supported" is a promise about the product, not about M1 — now scheduled
+instead of implied. This also keeps EXTERNAL out of prompt 6's scope, per that
+prompt's own revisit clause.
+**Revisit if:** a target network requires EXTERNAL for registration during the
+dogfood month — that pulls it forward from the menu.
+
+## Decision — rusqlite with the bundled feature into havoc-core
+**Date:** 2026-08-10  **Affects:** crates/havoc-core/Cargo.toml, prompt 3
+
+**Chose:** `rusqlite` (0.40, `bundled`) as havoc-core's storage engine dependency.
+**Over:** linking the system SQLite (no `bundled`).
+**Because:** rusqlite itself is the NORTH-STAR §5.1 decision — the entry here is
+for the *feature*: `bundled` compiles a pinned SQLite into the binary, so every
+build on every machine and CI runner exercises the same SQLite version, and the
+FTS5 module (prompt 8) is guaranteed present rather than dependent on the host
+library's compile flags. Cost: the C build NORTH-STAR already accepts knowingly,
+plus slower cold builds (~20s once per toolchain).
+**Revisit if:** distribution packaging ever demands dynamic linking against a
+distro SQLite.
+
+## Prompt 3 — Storage schema and migrations
+
+**Commit:** PR #6 (squash)  **Date:** 2026-08-10
+
+**Shipped:** havoc-core's storage layer — the §4.9 schema via hand-rolled
+`user_version` migrations (per the recorded decision), WAL + foreign keys, the
+dedicated storage thread behind a job channel, and the supernaut binary opening the
+store at startup with `--data-dir` / XDG default and printing migrate-vs-up-to-date.
+
+**Deviations:** replies use fresh single-use `std::sync::mpsc` channels — std has no
+oneshot; semantics identical. Migration runs on the caller's thread before the
+connection moves to the storage thread, so failures surface before startup
+continues. The smoke insert/read surface is `#[cfg(test)]`-gated rather than
+shipped. `--data-dir` is hand-parsed (one flag; an arg-parsing dependency is not yet
+justified — revisited at prompt 5 via carry-forward).
+
+**Deferred:** None.
+
+**Learned:** `message` being WITHOUT ROWID means FTS5's external-content pattern
+(`content_rowid`) cannot apply as sketched — caught by the review, now a
+carry-forward on prompt 8 where it changes the design, not a mid-session surprise.
+Also: sqlite's `sqlite_autoindex_*` objects appear for UNIQUE constraints; the
+schema test filters `sqlite_%` deliberately.
+
+**Measured:** rusqlite bundled adds ~20s to a cold build (SQLite C compile);
+incremental builds unaffected (0.5s).
+
+**Live run:** `supernaut --data-dir <fresh>` twice: first prints `schema v1,
+migrated v0 -> v1`, second prints `schema v1, up-to-date`; `sqlite3 .schema message`
+shows the §4.9 shape (WITHOUT ROWID, partial unique msgid index, millis time
+index). All 11 test targets green; lint clean.
+
+**Review:** adopted — the schema-shape test was a silhouette (names + PK only) and
+now asserts columns, both index column lists, and the `WHERE msgid IS NOT NULL`
+predicate; the premature `synchronous = NORMAL` pragma was removed (prompt 7's
+flood harness owns fsync tuning; a comment marks the seam). Rejected:
+gating `ensure_network`/`ensure_buffer` behind cfg(test) (they are the deliberate
+buffer-creation seam and the integration tests exercise them; their conflict
+semantics get re-reviewed at prompt 7 via the note raised there);
+removing `StorageError::FutureSchema` (refusing to touch a newer schema protects
+the user's irreplaceable archive — fail fast); the claimed missing rusqlite
+allowlist edit (rusqlite has been on `DEP_ALLOWLIST` since the bootstrap seeding —
+not visible in the reviewer's diff; local + CI `make check` prove it).
+
+**Carry-forward consumed:** both prompt-3 notes — the schema derives its units and
+discriminants from havoc-ipc (`server_time` in millis; `kind_code`/`buffer_kind_str`
+as deliberate pinned mappings with a stability test), and the two pre-settled
+decisions were executed, not re-decided (no refinery; `UNIQUE(network_id, name)`).
+
+**Carry-forward raised:** seven, all from the review harvest, all adopted:
+prompt 5 (main's closed arg grammar + the arg-parsing dependency decision),
+prompt 7 (ensure_buffer discards kind on conflict; the Storage handle blocks the
+calling thread — decide the async bridge; tags-as-CBOR needs ciborium in
+havoc-core), prompt 8 (WITHOUT ROWID vs FTS5 external-content; search queues
+behind the single write FIFO), stage 6 item 1 (last_read_seq is single-marker disk
+shape). Rejected from the harvest: none.

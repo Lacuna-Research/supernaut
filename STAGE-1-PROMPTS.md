@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 2/10 complete. Next: prompt 3.
+**Status:** 3/10 complete. Next: prompt 4.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -205,16 +205,13 @@ logic beyond the column existing (prompt 9). Do not export storage row types
 through havoc-ipc unless they genuinely cross the wire.
 ```
 
-### Carry-forward
-
-- From prompt 2: **the schema's units and discriminants are already fixed by
-  havoc-ipc — derive the columns from them.** `MessageKind`/`BufferKind`
-  (`crates/havoc-ipc/src/lib.rs`) serialize snake_case; ids are `i64` newtypes;
-  `ServerTime` is Unix **milliseconds** and `as_unix_millis` is its only accessor.
-  The `(buffer_id, server_time)` index column must be millis (IRCv3 `server-time`
-  parses to sub-second ISO8601 — seconds would truncate and not round-trip), and
-  the `kind` column encoding must be a deliberate mapping of these enums, not a
-  second enum.
+**Status:** complete. Shipped as ordered; the smoke insert/read path is
+`#[cfg(test)]`-gated so no shipped write API pre-decides prompt 7, and the review
+strengthened the schema assertion from a silhouette to column-exact, removed a
+premature `synchronous` pragma, and raised seven carry-forward notes (prompts 5, 7,
+8 and stage 6). `ensure_network`/`ensure_buffer` ship un-gated as the deliberate
+buffer-creation seam — their conflict semantics are re-examined at prompt 7 via the
+note there.
 
 ---
 
@@ -227,8 +224,11 @@ through havoc-ipc unless they genuinely cross the wire.
 Build the connection state machine in havoc-core — the crown jewels (NORTH-STAR
 §5.2) — entirely offline, against a scripted fake transport.
 
-- The SASL-mechanism Still-open item blocks this prompt; settle it first, since
-  the mechanism-selection shape depends on the answer.
+- The SASL-mechanism question is already settled — decision entry in
+  BUILD-LOG.md dated 2026-08-10: stage 1 implements PLAIN over TLS only, but the
+  mechanism-selection state is shaped as an ordered preference list with
+  per-mechanism states, so EXTERNAL (CertFP) drops in later without reshaping
+  the machine. Execute that shape; do not implement EXTERNAL here.
 - One actor per network, instantiated from a HashMap<NetworkId, _> even though
   exactly one network is configured (§6.9). Communication by channels only; no
   shared mutable state with anything.
@@ -327,6 +327,13 @@ typed messages, no serialization).
   lands as Events" — connect/join/send success is only observable by tailing
   correlated events. Design the CLI's command flow around the event stream, not
   the reply.
+- From prompt 3: **supernaut's `main` is open-print-exit behind a closed arg
+  grammar.** `data_dir_from_args` in `crates/supernaut/src/main.rs` rejects
+  everything except `--data-dir`, which is prompt 3's documented acceptance
+  behavior and must survive the CLI rewrite. Its "one flag, no dependency
+  justified" rationale expires the moment subcommands exist — schedule the
+  arg-parsing dependency decision (entry + allowlist) in the prompt text, not
+  mid-session.
 
 ---
 
@@ -385,6 +392,23 @@ scenarios beyond what ergo can produce today (stage 5 tests against a real bounc
   needs msgid at insert. Plan a core-internal ingest type (rows are core's private
   business per prompt 3's fence) or amend the wire type and its doc — decide in
   the prompt text, not mid-session.
+- From prompt 3: **`ensure_buffer` silently discards `kind` on conflict.** In
+  `crates/havoc-core/src/storage/mod.rs` it does `ON CONFLICT ... DO NOTHING`
+  then selects the existing id — a buffer first created as `query` stays `query`
+  even when later ensured as `channel`, with no error. Ingest creates buffers
+  from live traffic: define re-kind semantics in the prompt or forbid ingestion
+  from using this helper.
+- From prompt 3: **the `Storage` handle is synchronous — every method parks the
+  calling thread.** All methods block on `std::sync::mpsc` `recv()`; actors are
+  tokio tasks, and calling this inline from one stalls the executor. Decide the
+  bridge (async facade over the job channel, or `spawn_blocking`) in the prompt
+  text, not when the flood test hangs. Also: the flood harness owns `PRAGMA
+  synchronous` tuning — `Storage::open` deliberately leaves it at the default.
+- From prompt 3: **`message.tags` is declared CBOR on disk, but havoc-core has no
+  CBOR dependency.** `crates/havoc-core/migrations/0001_init.sql` commits the
+  column; ciborium is only havoc-ipc's dev-dep. Writing tags means a runtime
+  ciborium dependency in havoc-core — decision entry + it is already on the
+  global allowlist — so budget it into the prompt.
 
 ---
 
@@ -417,6 +441,17 @@ ranking work beyond FTS5 defaults.
   (core parses `from:`/`in:`) and no search variant on `ResponseBody`. Structured
   filter fields or a synchronous results response are wire changes — design the
   filter grammar as core-side parsing of a plain string with no wire cooperation.
+- From prompt 3: **`message` is WITHOUT ROWID — FTS5 external-content's rowid
+  contract cannot hold.** External-content FTS5 (`content='message'`) syncs by
+  `content_rowid`, and `message` in `crates/havoc-core/migrations/0001_init.sql`
+  has no rowid at all. Design the FTS migration around contentless-delete FTS5 or
+  an explicit docid mapping *before* the session starts — this is a schema-design
+  question, not an implementation detail.
+- From prompt 3: **one connection, one FIFO — search queues behind batched
+  writes.** `run` in `crates/havoc-core/src/storage/mod.rs` drains a single job
+  queue on the single connection, and prompt 7 holds that thread in ~100ms write
+  transactions. WAL permits a second read-only connection; decide deliberately
+  whether search gets its own reader, in the prompt text.
 
 ---
 
