@@ -351,3 +351,104 @@ wire through the binary or add the edge deliberately with the boundary-check
 amendment. Both from the review harvest. Rejected from the harvest: an alias-path
 warning for prompt 2 (moot once the aliases were deleted) and a license-texts note
 for stage 6 (superseded by the Still-open item).
+
+## Decision — buffer identity: two buffers, merged view is a projection
+**Date:** 2026-08-09  **Affects:** prompt 3 (schema), PLAN.md Still open
+
+**Chose:** `#rust` on two networks is two buffers. The §4.9 schema stands as
+sketched — `UNIQUE(network_id, name)` — and any future merged view is a
+client/query-side projection over matching buffer names, never a storage-level
+merge, so the schema stays untouched and this question never reopens.
+**Over:** a cross-network buffer entity.
+**Because:** networks are distinct protocol and trust domains — nick lists, modes,
+accounts, and `msgid` uniqueness are all per-network, and per-buffer `seq` ordering
+plus the `(buffer_id, msgid)` dedup index only stay coherent if a buffer belongs to
+exactly one network. A projection delivers the merged-view feature request without
+the ordering hazard. This was NORTH-STAR §9's lean; now it is settled.
+
+## Decision — migrations: hand-rolled versioned SQL over refinery
+**Date:** 2026-08-09  **Affects:** prompt 3 (storage), PLAN.md Still open
+
+**Chose:** a hand-rolled migration runner keyed on `PRAGMA user_version`: numbered
+SQL files embedded via `include_str!`, each applied in its own transaction in order
+at startup, immutable once merged.
+**Over:** the `refinery` crate.
+**Because:** the dependency policy treats every dependency as surface, and the
+runner this project needs is under a hundred lines against an embedded database
+whose lifecycle we fully own — refinery brings macros and its own bookkeeping table
+to solve exactly what `user_version` already provides. NORTH-STAR §4.9 left this as
+an explicit either-or; the project's own dependency ethos decides it.
+**Revisit if:** migrations ever need Rust-code steps (data rewrites beyond SQL) or
+multi-writer checksum discipline — those are refinery's actual value.
+
+## Decision — havoc-ipc dependencies: serde runtime, ciborium dev-only, no time crate
+**Date:** 2026-08-09  **Affects:** crates/havoc-ipc/Cargo.toml, prompt 2
+
+**Chose:** `serde` (derive) as havoc-ipc's only runtime dependency; `ciborium` as a
+dev-dependency for the round-trip tests; **no `time` crate** — `ServerTime` wraps a
+unix-milliseconds `i64` and implements no ordering.
+**Over:** the prompt's sketch of "serde (derive) and a time type" as runtime deps.
+**Because:** the wire needs a timestamp *value*, not calendar arithmetic; owning the
+integer keeps the wire crate at one runtime dependency and makes the no-ordering
+rule structural rather than conventional. The `time` crate enters the workspace when
+something actually formats timestamps for display (supernaut-tui, stage 2), with its
+own decision entry. The allowlist already carries serde/ciborium/time from the
+bootstrap seeding, so no allowlist edit accompanies this.
+
+## Prompt 2 — IPC wire types
+
+**Commit:** PR #5 (squash)  **Date:** 2026-08-09
+
+**Shipped:** havoc-ipc's stage-1 surface — newtype IDs, `ServerTime` with no
+ordering, `Request`/`Response`/`Event`, `Anchor`, `MessageKind`, buffer/network
+models, `PROTOCOL_VERSION`, the empty `caps` module — with CBOR round-trip tests for
+every variant and the unknown-field-tolerance proof. Plus a check fix the prompt
+surfaced: the ipc dependency cap now counts runtime and build deps but not dev-deps
+(`runtime_deps_of` in check-docs.sh, three fixtures).
+
+**Deviations:** no `time` crate (decision entry: `ServerTime` owns a unix-millis
+i64); `Request`/`Response` are id+body wrapper structs rather than the order's
+literal "enum carrying a RequestId" — wire-equivalent, one shape for correlation;
+one combined dependency decision entry rather than one per crate name — it is one
+dependency story. The two prompt-3 blockers were settled here (buffer identity,
+migrations) because the status line cannot name a blocked prompt as next — the
+mechanism working exactly as designed.
+
+**Deferred:** None.
+
+**Learned:** serde's default unknown-field tolerance is the whole CBOR evolution
+story for structs, but enum variants are decode errors — the capability handshake
+must gate variants, now recorded on stage 4's plan item. And the first draft of the
+dev-deps check fix silently exempted [build-dependencies], which do compile on user
+machines — the reviewer caught it; the cap now counts them, with a fixture.
+
+**Measured:** havoc-ipc runtime tree: serde only (cargo tree -e normal). Six
+round-trip tests, 767-line diff pre-review.
+
+**Live run:** N/A — types only; nothing has behavior to observe. `make build`,
+`make test` (6/6 in havoc-ipc), `make lint`, `make check`, and `./scripts/
+test-checks.sh` (38 fixtures) all green locally; CI green on the PR.
+
+**Review:** adopted — the `time` gap between decision and check (IPC_ALLOWLIST
+tightened to serde/bitflags, fixture updated), the build-deps exemption (counted
+now, fail fixture added), the missing prompt-outcome block (appended), and the
+prompt-3 bullet rewrite so the session executes the recorded decisions instead of
+re-deciding. Rejected: dropping Ord from NetworkId/BufferId (they are map keys and
+list-sort keys; the §4.6 hazard is time-ordering of *messages*, which ServerTime's
+shape forecloses); splitting the deps decision entry (one story, three names);
+package-rename evasion of the allowlist (known limitation, recorded at bootstrap
+with its revisit trigger); "fixture coverage one-sided" (the pre-existing
+tokio-in-[dependencies] fail fixture exercises the strict side of the same
+function — not visible in the diff the reviewer had).
+
+**Carry-forward consumed:** none — no notes were attached to prompt 2 (the one
+proposed against it at prompt 1 was rejected as moot when the aliases were
+deleted).
+
+**Carry-forward raised:** eight, all from the review harvest, all adopted: prompt 3
+(schema units/discriminants fixed by havoc-ipc), prompt 4 (ConnectionPhase is a
+3-variant projection), prompt 5 (SearchResults-on-broadcast leak; Ack is
+fire-and-forget), prompt 7 (msgid has no berth on wire Message — ingest type
+needed), prompt 8 (search wire shape frozen), prompt 9 (Backlog Vec has no
+has-more/hit-marker), stage 2 item 3 (time-crate debt), stage 4 item 2 (variant
+intolerance). Rejected from the harvest: none.

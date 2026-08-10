@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 1/10 complete. Next: prompt 2.
+**Status:** 2/10 complete. Next: prompt 3.
 
 <!-- 10 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. -->
@@ -153,6 +153,13 @@ business), or put behavior on these types beyond construction and serde. havoc-i
 is data; logic here is the boundary eroding in its first week.
 ```
 
+**Status:** complete. Shipped as ordered except: no `time` crate — `ServerTime` owns
+a raw unix-millis `i64` (decision entry 2026-08-09), and the ipc dependency cap was
+tightened to serde/bitflags with build-deps now counted (check fix + fixtures in the
+same PR). The review froze eight wire-shape consequences into carry-forward notes on
+prompts 3–9 and PLAN stages 2/4. Unknown-*variant* intolerance is deliberately
+untested — it is real, and stage 4's handshake owns it (note on the plan item).
+
 ---
 
 ## Prompt 3 — Storage schema and migrations
@@ -164,9 +171,12 @@ is data; logic here is the boundary eroding in its first week.
 Give havoc-core its storage layer: SQLite opened, migrated, and owned by a
 dedicated thread — before any messages exist to store.
 
-- Two Still-open items block this prompt (PLAN.md §0): buffer identity across
-  networks, and the migration mechanism (refinery vs hand-rolled). Settle both
-  first and record the decision entries; the schema hardens here.
+- The two questions that blocked this prompt are already settled — decision
+  entries in BUILD-LOG.md dated 2026-08-09: buffer identity (two buffers;
+  `UNIQUE(network_id, name)` stands; merged view is a client/query-side
+  projection) and the migration mechanism (hand-rolled runner keyed on
+  `PRAGMA user_version`, numbered SQL via `include_str!`, one transaction
+  each). Execute them; do not re-decide, and do not reach for refinery.
 - rusqlite, WAL on. Storage lives on its own thread behind a channel (NORTH-STAR
   §6.6): request messages in, replies via oneshot, and nothing else ever touches
   the connection. This is also what keeps prompt 8's search from ever blocking a
@@ -194,6 +204,17 @@ path deserves its own session with a flood test), FTS5 (prompt 8), or read-marke
 logic beyond the column existing (prompt 9). Do not export storage row types
 through havoc-ipc unless they genuinely cross the wire.
 ```
+
+### Carry-forward
+
+- From prompt 2: **the schema's units and discriminants are already fixed by
+  havoc-ipc — derive the columns from them.** `MessageKind`/`BufferKind`
+  (`crates/havoc-ipc/src/lib.rs`) serialize snake_case; ids are `i64` newtypes;
+  `ServerTime` is Unix **milliseconds** and `as_unix_millis` is its only accessor.
+  The `(buffer_id, server_time)` index column must be millis (IRCv3 `server-time`
+  parses to sub-second ISO8601 — seconds would truncate and not round-trip), and
+  the `kind` column encoding must be a deliberate mapping of these enums, not a
+  second enum.
 
 ---
 
@@ -254,6 +275,12 @@ enough).
   `scripts/check-docs.sh` does not permit. Define the trait the actor codes against
   in havoc-core (or havoc-ipc) from the outset; do not sketch it into
   havoc-transport and discover the missing edge mid-session.
+- From prompt 2: **the wire connection state is a 3-variant projection, not the
+  state machine.** `ConnectionPhase` in `crates/havoc-ipc/src/lib.rs` has only
+  Connecting/Registered/Disconnected; this machine has ~8 states plus the reconnect
+  seam. Map internal states onto the coarse enum at the actor's boundary —
+  exporting the real state enum through havoc-ipc, or widening `ConnectionPhase`
+  mid-session, is a wire change under `PROTOCOL_VERSION`.
 
 ---
 
@@ -288,6 +315,18 @@ typed messages, no serialization).
   plain channels and `supernaut` adapts them to havoc-transport's trait, or add the
   edge deliberately — with the `scripts/check-docs.sh` boundary-check amendment and
   its fixtures in the same change — not as a mid-session surprise.
+- From prompt 2: **`Event` is contractually broadcast, but `SearchResults` is
+  request-correlated.** `Event::SearchResults { request, .. }` in
+  `crates/havoc-ipc/src/lib.rs` sits inside a type documented "broadcast to every
+  attached client" — as shipped, every client would receive every other client's
+  search hits. Decide the bus semantics deliberately (broadcast-and-filter vs
+  routed correlated events) and record it, or stage 4's multi-client attach
+  inherits an information-leak-shaped accident.
+- From prompt 2: **`Ack` is fire-and-forget; the debug CLI cannot await outcomes
+  via Response.** `ResponseBody::Ack`'s contract is "accepted; resulting state
+  lands as Events" — connect/join/send success is only observable by tailing
+  correlated events. Design the CLI's command flow around the event stream, not
+  the reply.
 
 ---
 
@@ -337,6 +376,16 @@ scenarios beyond what ergo can produce today (stage 5 tests against a real bounc
 
 *To be written out before it starts.*
 
+### Carry-forward
+
+- From prompt 2: **`msgid` has no berth on the wire `Message`.** The `tags` doc in
+  `crates/havoc-ipc/src/lib.rs` excludes msgid as "lifted into fields", but
+  `Message` has no msgid field — excluded from tags *and* absent. The
+  actor→storage ingest path therefore cannot ride `havoc_ipc::Message`; dedup
+  needs msgid at insert. Plan a core-internal ingest type (rows are core's private
+  business per prompt 3's fence) or amend the wire type and its doc — decide in
+  the prompt text, not mid-session.
+
 ---
 
 ## Prompt 8 — Full-text search
@@ -361,6 +410,14 @@ ranking work beyond FTS5 defaults.
 
 *To be written out before it starts.*
 
+### Carry-forward
+
+- From prompt 2: **Search's wire shape is frozen: verbatim string in, events
+  out.** `RequestBody::Search { query: String }` in `crates/havoc-ipc/src/lib.rs`
+  (core parses `from:`/`in:`) and no search variant on `ResponseBody`. Structured
+  filter fields or a synchronous results response are wire changes — design the
+  filter grammar as core-side parsing of a plain string with no wire cooperation.
+
 ---
 
 ## Prompt 9 — Windowed backlog and read markers
@@ -384,6 +441,16 @@ Do not: read-marker reconciliation between clients or `draft/read-marker` upstre
 server-side cap for any caller.
 
 *To be written out before it starts.*
+
+### Carry-forward
+
+- From prompt 2: **backlog replies are a bare Vec — no has-more signal, no hit
+  marker.** `ResponseBody::Backlog { messages }` and `Anchor::AroundSearchHit(Seq)`
+  in `crates/havoc-ipc/src/lib.rs`: with `limit` capped server-side, a short Vec is
+  ambiguous between window-exhausted and history-start, and an around-hit window
+  carries no indication of where the hit sits. If this prompt needs either signal,
+  it is a wire change to a shipped type — settle that while writing the prompt
+  detail, not mid-session.
 
 ---
 

@@ -509,11 +509,36 @@ name = "havoc-ipc"
 
 [dependencies]
 serde = "1"
-time = "0.3"
 bitflags = "2"
 EOF
 stage_all
 expect pass "havoc-ipc within its cap passes"
+
+cat >crates/havoc-ipc/Cargo.toml <<'EOF'
+[package]
+name = "havoc-ipc"
+
+[dependencies]
+serde = "1"
+
+[dev-dependencies]
+ciborium = "0.2"
+EOF
+stage_all
+expect pass "havoc-ipc dev-dependencies do not count against the cap"
+
+cat >crates/havoc-ipc/Cargo.toml <<'EOF'
+[package]
+name = "havoc-ipc"
+
+[dependencies]
+serde = "1"
+
+[build-dependencies]
+ciborium = "0.2"
+EOF
+stage_all
+expect fail "havoc-ipc build-dependencies do count against the cap" "near zero-dep"
 
 # --- Summary ---------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$failures"
