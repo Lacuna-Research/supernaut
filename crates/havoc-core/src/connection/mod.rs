@@ -8,6 +8,7 @@
 
 pub mod actor;
 mod caps;
+pub mod ingest;
 pub mod io;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -185,7 +186,10 @@ impl Machine {
         self.handle_message(&message)
     }
 
-    fn handle_message(&mut self, message: &irc_proto::Message) -> Vec<String> {
+    /// Feed one already-parsed message. Public since prompt 7: the actor
+    /// parses each line exactly once and shares the parse between the machine
+    /// and the ingest classifier.
+    pub fn handle_message(&mut self, message: &irc_proto::Message) -> Vec<String> {
         use irc_proto::Command;
 
         match &message.command {

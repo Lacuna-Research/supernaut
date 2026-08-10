@@ -11,7 +11,7 @@ use havoc_ipc::{ConnectionPhase, NetworkId};
 use tokio::sync::mpsc;
 
 use super::io::{AnyLineTransport, LineTransport, Security};
-use super::{Config, Machine, State};
+use super::{Config, Machine, State, ingest};
 
 /// Commands the core sends its actor. Dropped while disconnected: autojoin
 /// re-fires on the fresh machine, and a PRIVMSG delivered seconds after a
@@ -29,8 +29,8 @@ pub enum ActorReport {
         phase: ConnectionPhase,
         detail: Option<String>,
     },
-    /// The server confirmed *our* join of this channel.
-    JoinedChannel(String),
+    /// A line classified for history: the write path's entry point.
+    Message(crate::storage::Ingest),
 }
 
 /// Handle held in the `Networks` map: the command lane plus the task itself.
@@ -72,6 +72,14 @@ fn backoff_delay(attempt: u32) -> Duration {
         .unwrap_or(0);
     let factor = 0.5 + f64::from(micros % 1_000) / 1_000.0; // 0.5..1.5
     Duration::from_millis((base as f64 * 1_000.0 * factor) as u64)
+}
+
+/// Local receipt time for the server-time fallback.
+fn now_millis() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+        .unwrap_or(0)
 }
 
 /// How one connection attempt ended.
@@ -220,8 +228,15 @@ async fn attempt_once(
                     eprintln!("<< {line}");
                 }
 
+                // Parse exactly once; the machine and the classifier share it.
+                // Unparseable lines are skipped, preserving the machine's
+                // ignore rule (real networks emit garbage).
+                let Ok(parsed) = line.parse::<irc_proto::Message>() else {
+                    continue;
+                };
+
                 let before = machine.state().clone();
-                let replies = machine.handle_line(&line);
+                let replies = machine.handle_message(&parsed);
                 for reply in replies {
                     if trace {
                         eprintln!(">> {reply}");
@@ -250,12 +265,11 @@ async fn attempt_once(
                         .await;
                 }
 
-                // The machine parses internally and discards non-protocol
-                // messages (prompt-7 note owns the parse-once seam). The one
-                // thing the wiring needs today — our own confirmed JOIN — is
-                // detected here with a second, local parse.
-                if let Some(channel) = our_join(&line, machine.nick()) {
-                    let _ = reports.send((network, ActorReport::JoinedChannel(channel))).await;
+                // The same parse feeds history. Buffer creation rides
+                // ingestion (our confirmed JOIN arrives as a Join message);
+                // our_join and JoinedChannel are gone.
+                if let Some(item) = ingest::classify(&parsed, machine.nick(), now_millis()) {
+                    let _ = reports.send((network, ActorReport::Message(item))).await;
                 }
             }
             command = commands.recv() => {
@@ -280,31 +294,8 @@ async fn attempt_once(
     }
 }
 
-/// Does this line confirm our own JOIN? (`:nick!user@host JOIN #chan`)
-fn our_join(line: &str, our_nick: &str) -> Option<String> {
-    let message: irc_proto::Message = line.parse().ok()?;
-    let irc_proto::Command::JOIN(channels, _, _) = &message.command else {
-        return None;
-    };
-    let nick = match &message.prefix {
-        Some(irc_proto::Prefix::Nickname(nick, _, _)) => nick,
-        _ => return None,
-    };
-    (nick == our_nick).then(|| channels.clone())
-}
-
 #[cfg(test)]
 mod tests {
-    #[test]
-    fn our_join_matches_only_our_nick() {
-        assert_eq!(
-            super::our_join(":hvc!u@h JOIN #supernaut", "hvc").as_deref(),
-            Some("#supernaut")
-        );
-        assert_eq!(super::our_join(":bob!u@h JOIN #supernaut", "hvc"), None);
-        assert_eq!(super::our_join(":irc.example 001 hvc :hi", "hvc"), None);
-    }
-
     #[test]
     fn backoff_grows_and_caps() {
         for attempt in 1..12 {

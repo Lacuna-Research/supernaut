@@ -74,7 +74,7 @@ fn open_store_and_report(data_dir: Option<PathBuf>) -> ExitCode {
     }
 
     let db_path = data_dir.join("history.db");
-    match Storage::open(&db_path) {
+    match Storage::open(&db_path, false) {
         Ok((storage, report)) => {
             let state = if report.applied() > 0 {
                 format!(

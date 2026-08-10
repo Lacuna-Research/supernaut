@@ -11,8 +11,7 @@
 use std::collections::HashMap;
 
 use havoc_ipc::{
-    BufferId, BufferInfo, BufferKind, Event, NetworkId, Request, RequestBody, Response,
-    ResponseBody,
+    BufferId, BufferInfo, Event, NetworkId, Request, RequestBody, Response, ResponseBody,
 };
 use tokio::sync::{broadcast, mpsc};
 
@@ -20,7 +19,7 @@ use crate::bus::{Bus, ClientId, Directed};
 use crate::connection::actor::{self, ActorCommand, ActorReport, ActorSpawn};
 use crate::connection::io::Security;
 use crate::connection::{Config as ConnectionConfig, Networks};
-use crate::storage::StorageClient;
+use crate::storage::{IngestOutcome, NetworkRow, StorageClient};
 
 /// Everything needed to reach one configured network. Flags today, config
 /// file at prompt 10.
@@ -94,12 +93,14 @@ impl Core {
 struct CoreState {
     storage: StorageClient,
     settings: HashMap<NetworkId, NetworkSettings>,
-    /// Caller NetworkId → storage row id, filled at connect.
-    network_rows: HashMap<NetworkId, havoc_ipc::NetworkId>,
+    /// Caller NetworkId → storage row, filled at connect. Different types by
+    /// design: the id spaces can no longer be swapped silently.
+    network_rows: HashMap<NetworkId, NetworkRow>,
     buffers: HashMap<BufferId, (NetworkId, String)>,
     networks: Networks,
     trace: bool,
     reports_tx: mpsc::Sender<(NetworkId, ActorReport)>,
+    outcome_tx: mpsc::Sender<IngestOutcome>,
 }
 
 async fn run(
@@ -111,6 +112,7 @@ async fn run(
     mut attach: mpsc::Receiver<(ClientId, mpsc::Sender<Directed>)>,
 ) {
     let (reports_tx, mut reports) = mpsc::channel::<(NetworkId, ActorReport)>(256);
+    let (outcome_tx, mut outcomes) = mpsc::channel::<IngestOutcome>(1024);
     let mut state = CoreState {
         storage,
         settings,
@@ -119,6 +121,7 @@ async fn run(
         networks: Networks::default(),
         trace,
         reports_tx,
+        outcome_tx,
     };
 
     loop {
@@ -131,7 +134,10 @@ async fn run(
                 bus.direct(client, Directed::Response(response)).await;
             }
             Some((network, report)) = reports.recv() => {
-                handle_report(&mut state, &mut bus, network, report).await;
+                handle_report(&mut state, &mut bus, network, report);
+            }
+            Some(outcome) = outcomes.recv() => {
+                handle_outcome(&mut state, &bus, outcome);
             }
             else => return,
         }
@@ -204,12 +210,7 @@ async fn connect(state: &mut CoreState, network: NetworkId) -> ResponseBody {
     ResponseBody::Ack
 }
 
-async fn handle_report(
-    state: &mut CoreState,
-    bus: &mut Bus,
-    network: NetworkId,
-    report: ActorReport,
-) {
+fn handle_report(state: &mut CoreState, bus: &mut Bus, network: NetworkId, report: ActorReport) {
     match report {
         ActorReport::Phase { phase, detail } => {
             bus.broadcast(Event::ConnectionState {
@@ -218,28 +219,54 @@ async fn handle_report(
                 detail,
             });
         }
-        ActorReport::JoinedChannel(channel) => {
+        // The no-await ingest lane: a plain non-blocking send into the storage
+        // job queue. The flood cannot serialize through this select loop.
+        ActorReport::Message(item) => {
             let Some(row) = state.network_rows.get(&network).copied() else {
+                // Structurally unreachable (connect fills the map before the
+                // actor exists) — but history must never vanish silently.
+                eprintln!("ingest dropped: unknown network {}", network.0);
                 return;
             };
-            let storage = state.storage.clone();
-            let name = channel.clone();
-            let result = tokio::task::spawn_blocking(move || {
-                storage.ensure_buffer(row, &name, BufferKind::Channel)
-            })
-            .await;
-            let Ok(Ok(buffer)) = result else { return };
-            state.buffers.insert(buffer, (network, channel.clone()));
-            bus.broadcast(Event::BufferCreated {
-                buffer: BufferInfo {
-                    id: buffer,
-                    network,
-                    name: channel,
-                    kind: BufferKind::Channel,
-                    last_read_seq: None,
-                },
-            });
+            let _ = state
+                .storage
+                .ingest(network, row, item, state.outcome_tx.clone());
         }
+    }
+}
+
+/// Post-commit: emit BufferCreated only on first touch per core instance —
+/// across a reconnect the replayed autojoin re-ensures the same row and emits
+/// nothing — then MessageAdded per inserted row, in order.
+fn handle_outcome(state: &mut CoreState, bus: &Bus, outcome: IngestOutcome) {
+    let known = state.buffers.contains_key(&outcome.buffer);
+    state.buffers.insert(
+        outcome.buffer,
+        (outcome.network, outcome.buffer_name.clone()),
+    );
+    if outcome.buffer_created && !known {
+        bus.broadcast(Event::BufferCreated {
+            buffer: BufferInfo {
+                id: outcome.buffer,
+                network: outcome.network,
+                name: outcome.buffer_name,
+                kind: outcome.buffer_kind,
+                last_read_seq: None,
+            },
+        });
+    }
+    if let Some(message) = outcome.message {
+        bus.broadcast(Event::MessageAdded {
+            message: havoc_ipc::Message {
+                buffer: outcome.buffer,
+                seq: message.seq,
+                kind: message.kind,
+                nick: message.nick,
+                text: message.text.unwrap_or_default(),
+                server_time: message.server_time,
+                tags: message.tags,
+            },
+        });
     }
 }
 
