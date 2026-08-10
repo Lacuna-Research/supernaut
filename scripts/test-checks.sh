@@ -35,12 +35,12 @@ build_repo() {
 	git config user.email test@example.invalid
 	git config user.name test
 
-	mkdir -p scripts src
+	mkdir -p scripts crates
 	cp "$TEMPLATE_ROOT/scripts/check-docs.sh" scripts/
 	cp "$TEMPLATE_ROOT/scripts/measure-ratchets.sh" scripts/
 	chmod +x scripts/*.sh
 	# The fixture stage is 3 prompts; the template default is a placeholder.
-	sed -i.bak 's|"1:STAGE-1-PROMPTS.md:11"|"1:STAGE-1-PROMPTS.md:3"|' scripts/check-docs.sh
+	sed -i.bak 's|"1:STAGE-1-PROMPTS.md:10"|"1:STAGE-1-PROMPTS.md:3"|' scripts/check-docs.sh
 	rm scripts/check-docs.sh.bak
 
 	seq 1 50 | sed 's/^/rule /' >CLAUDE.md
@@ -109,7 +109,7 @@ EOF
 **Live run:** launched it.
 EOF
 
-	printf 'x\n' >src/main.txt
+	printf 'x\n' >crates/main.txt
 	git add -A
 	git commit -qm baseline
 }
@@ -152,7 +152,7 @@ printf 'check-docs.sh test suite\n'
 
 # --- Baseline -------------------------------------------------------------
 build_repo
-printf 'y\n' >>src/main.txt
+printf 'y\n' >>crates/main.txt
 cat >>BUILD-LOG.md <<'EOF'
 
 ## Prompt 2b — touch
@@ -178,12 +178,12 @@ expect fail "editing a past log entry fails" "append-only"
 
 # --- 3. Substantive build-log entry ---------------------------------------
 build_repo
-printf 'y\n' >>src/main.txt
+printf 'y\n' >>crates/main.txt
 stage_all
-expect fail "src change with no log entry fails" "BUILD-LOG.md did not"
+expect fail "crates change with no log entry fails" "BUILD-LOG.md did not"
 
 build_repo
-printf 'y\n' >>src/main.txt
+printf 'y\n' >>crates/main.txt
 cat >>BUILD-LOG.md <<'EOF'
 
 ## Prompt 2b — touch
@@ -282,7 +282,7 @@ expect pass "finished stage with retrospective passes"
 
 # --- 11. Oversize prompt --------------------------------------------------
 build_repo
-seq 1 900 >src/big.txt
+seq 1 900 >crates/big.txt
 cat >>BUILD-LOG.md <<'EOF'
 
 ## Prompt 2b — big
@@ -356,7 +356,7 @@ EOF
 stage_all
 expect pass "ratchets at or under ceiling pass"
 
-printf 'TODO one\nTODO two\n' >>src/main.txt
+printf 'TODO one\nTODO two\n' >>crates/main.txt
 cat >>BUILD-LOG.md <<'EOF'
 
 ## Prompt 2b — touch
@@ -407,6 +407,113 @@ build_repo
 sed -i.bak 's/2%2F3/1%2F3/' README.md && rm README.md.bak
 stage_all
 expect fail "README with a stale badge still fails" "badge disagrees"
+
+# --- 17. Dependency allowlist ----------------------------------------------
+# log_entry: any fixture touching crates/ needs a substantive BUILD-LOG entry to
+# keep check 3 out of the way of the check actually under test.
+log_entry() {
+	cat >>BUILD-LOG.md <<'EOF'
+
+## Prompt 2b — manifest touch
+
+**Shipped:** a manifest. **Learned:** None. **Live run:** N/A (manifest only).
+EOF
+}
+
+build_repo
+mkdir -p crates/havoc-core
+cat >crates/havoc-core/Cargo.toml <<'EOF'
+[package]
+name = "havoc-core"
+
+[dependencies]
+left-pad = "1.0"
+EOF
+log_entry
+stage_all
+expect fail "dependency outside the allowlist fails" "allowlist"
+
+cat >crates/havoc-core/Cargo.toml <<'EOF'
+[package]
+name = "havoc-core"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+rusqlite.workspace = true
+
+[dependencies.tokio]
+version = "1"
+
+[dev-dependencies]
+havoc-ipc = { path = "../havoc-ipc" }
+EOF
+stage_all
+expect pass "allowlisted dependencies pass, in every declaration form"
+
+# --- 18. Crate boundaries (NORTH-STAR §4.2) --------------------------------
+build_repo
+mkdir -p crates/havoc-tui
+cat >crates/havoc-tui/Cargo.toml <<'EOF'
+[package]
+name = "havoc-tui"
+
+[dependencies]
+ratatui = "0.29"
+rusqlite = "0.32"
+EOF
+log_entry
+stage_all
+expect fail "rusqlite declared in havoc-tui fails" "forbidden by the crate boundaries"
+
+cat >crates/havoc-tui/Cargo.toml <<'EOF'
+[package]
+name = "havoc-tui"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+EOF
+stage_all
+expect pass "terminal deps in havoc-tui pass"
+
+build_repo
+mkdir -p crates/havoc-core
+cat >crates/havoc-core/Cargo.toml <<'EOF'
+[package]
+name = "havoc-core"
+
+[dependencies]
+crossterm = "0.28"
+EOF
+log_entry
+stage_all
+expect fail "terminal dep declared in havoc-core fails" "forbidden by the crate boundaries"
+
+build_repo
+mkdir -p crates/havoc-ipc
+cat >crates/havoc-ipc/Cargo.toml <<'EOF'
+[package]
+name = "havoc-ipc"
+
+[dependencies]
+serde = "1"
+tokio = "1"
+EOF
+log_entry
+stage_all
+expect fail "havoc-ipc growing a dependency fails" "near zero-dep"
+
+cat >crates/havoc-ipc/Cargo.toml <<'EOF'
+[package]
+name = "havoc-ipc"
+
+[dependencies]
+serde = "1"
+time = "0.3"
+bitflags = "2"
+EOF
+stage_all
+expect pass "havoc-ipc within its cap passes"
 
 # --- Summary ---------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$pass" "$failures"

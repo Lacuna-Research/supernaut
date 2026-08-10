@@ -10,7 +10,7 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-SOURCE_DIR="src"
+SOURCE_DIR="crates"
 
 if [ -d "$SOURCE_DIR" ]; then
 	# Deferred work markers. Each one is a promise; the ratchet caps how many
