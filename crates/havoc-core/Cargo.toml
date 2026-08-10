@@ -11,4 +11,11 @@ workspace = true
 havoc-ipc.workspace = true
 irc-proto = "1.1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = { version = "1.15.1", features = ["std"] }
 tokio = { version = "1.53.1", features = ["sync", "net", "time", "rt", "io-util", "macros"] }
+tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+webpki-roots = "1.0.9"
+
+[dev-dependencies]
+tokio = { version = "1.53.1", features = ["test-util", "sync", "net", "time", "rt", "io-util", "macros"] }

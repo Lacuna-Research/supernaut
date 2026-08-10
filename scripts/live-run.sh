@@ -39,6 +39,7 @@ for _ in 1 2 3; do
 	if ! nc -z 127.0.0.1 "$PORT" 2>/dev/null; then break; fi
 	PORT=$((RANDOM % 20000 + 20000))
 done
+TLS_PORT=$((PORT + 1))
 ERGO_PID=""
 A_PID=""
 
@@ -57,6 +58,10 @@ server:
   name: liverun.localhost
   listeners:
     "127.0.0.1:${PORT}": {}
+    "127.0.0.1:${TLS_PORT}":
+      tls:
+        cert: ${WORK}/fullchain.pem
+        key: ${WORK}/tls.key
   casemapping: "ascii"
   enforce-utf8: true
   max-sendq: 96k
@@ -103,17 +108,53 @@ history:
   chathistory-maxmessages: 100
 EOF
 
+# Self-signed cert for the DIALED name (localhost) — ergo's own mkcerts would
+# mint one for server.name, which is not what the client verifies against.
+openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+	-keyout "$WORK/tls.key" -out "$WORK/fullchain.pem" -days 2 -nodes \
+	-subj "/CN=localhost" -addext "subjectAltName=DNS:localhost" \
+	-addext "basicConstraints=critical,CA:FALSE" \
+	>>"$WORK/ergo.log" 2>&1
+
 "$ERGO" run --conf "$WORK/ircd.yaml" >"$WORK/ergo.log" 2>&1 &
 ERGO_PID=$!
 
 cargo build -q -p supernaut
 BIN=target/debug/supernaut
 
+# Wait for ergo to listen before anything dials it.
+for _ in $(seq 1 50); do
+	nc -z 127.0.0.1 "$PORT" 2>/dev/null && break
+	sleep 0.2
+done
+
+# Pre-register the SASL account over the plaintext loopback listener: NICK,
+# register with NickServ after 001, quit. The poll is grep-based — the same
+# honest sleep-class wait as the cross-session sync below; a `wait` verb
+# cannot help here because this exchange is raw nc, not a session.
+FAKE_PASS='fake-livetest-passw0rd'
+{
+	printf 'NICK alice\r\nUSER alice 0 * :pre-reg\r\n'
+	sleep 1
+	printf 'PRIVMSG NickServ :REGISTER %s\r\n' "$FAKE_PASS"
+	sleep 1
+	printf 'QUIT\r\n'
+} | nc -w 5 127.0.0.1 "$PORT" >"$WORK/prereg.out" || true
+grep -qi 'Account created\|already registered' "$WORK/prereg.out" || {
+	echo "FAIL: could not pre-register the alice account:" >&2
+	cat "$WORK/prereg.out" >&2
+	echo "--- ergo log tail:" >&2
+	tail -10 "$WORK/ergo.log" >&2
+	exit 1
+}
+
 # Session A: connect, register, join, then hold the session open while B's
 # message arrives (observed in A's --trace-irc capture — MessageAdded events
 # arrive in prompt 7). The fifo keeps stdin open until we say quit.
 mkfifo "$WORK/a.in"
-"$BIN" session --host 127.0.0.1 --port "$PORT" --nick alice --allow-plaintext \
+SUPERNAUT_SASL_PASSWORD="$FAKE_PASS" \
+	"$BIN" session --host localhost --port "$TLS_PORT" --nick alice \
+	--sasl alice --tls-ca "$WORK/fullchain.pem" \
 	--trace-irc --data-dir "$WORK/data-a" \
 	<"$WORK/a.in" >"$WORK/a.out" 2>"$WORK/a.trace" &
 A_PID=$!
@@ -134,18 +175,34 @@ grep -q 'waited buffer #supernaut' "$WORK/a.out" || {
 
 # Session B: the second party — join and send one line, then quit.
 printf 'connect\nwait registered 10\njoin #supernaut\nwait buffer #supernaut 10\nsend #supernaut the deployment failed\nquit\n' |
-	"$BIN" session --host 127.0.0.1 --port "$PORT" --nick bob --allow-plaintext \
-		--data-dir "$WORK/data-b" >"$WORK/b.out" 2>&1
+	"$BIN" session --host localhost --port "$TLS_PORT" --nick bob \
+		--tls-ca "$WORK/fullchain.pem" --data-dir "$WORK/data-b" >"$WORK/b.out" 2>&1
 
 # B's send must land in A's raw capture.
 for _ in $(seq 1 50); do
 	grep -q 'PRIVMSG #supernaut :the deployment failed' "$WORK/a.trace" && break
 	sleep 0.2
 done
+
+# The invisible-reconnect proof: kill ergo, restart it on the same port with
+# the same datastore, and watch A come back with no operator action.
+kill "$ERGO_PID" 2>/dev/null || true
+wait "$ERGO_PID" 2>/dev/null || true
+sleep 0.5
+"$ERGO" run --conf "$WORK/ircd.yaml" >>"$WORK/ergo.log" 2>&1 &
+ERGO_PID=$!
+printf 'wait registered 30\n' >&3
+for _ in $(seq 1 150); do
+	[ "$(grep -c 'phase=registered' "$WORK/a.out")" -ge 2 ] && break
+	sleep 0.2
+done
 printf 'quit\n' >&3
 exec 3>&-
 wait "$A_PID" 2>/dev/null || true
 A_PID=""
+
+# Keep the capture for the corpus harvest (gitignored; trace-to-steps.sh).
+cp "$WORK/a.trace" .cache/last-a.trace
 
 fail=0
 assert() {
@@ -163,8 +220,19 @@ assert "$WORK/a.out" 'event buffer-created .* name=#supernaut' 'A saw its buffer
 assert "$WORK/a.trace" '>> CAP LS 302' 'A trace captured the opening'
 assert "$WORK/a.trace" 'PRIVMSG #supernaut :the deployment failed' "B's send landed at A"
 assert "$WORK/b.out" 'event connection-state network=1 phase=registered' 'B registered'
+assert "$WORK/a.trace" '903 .*uthentication successful' 'A authenticated via SASL (903)'
+assert "$WORK/a.trace" '>> AUTHENTICATE PLAIN' 'A offered SASL PLAIN'
+assert "$WORK/a.out" 'phase=disconnected' 'A saw the ergo restart'
+assert "$WORK/a.out" 'phase=connecting detail=retry' 'A retried through backoff'
+if [ "$(grep -c 'phase=registered' "$WORK/a.out")" -ge 2 ]; then
+	printf 'ok    %s\n' 'A re-registered after the restart'
+else
+	printf 'FAIL  %s\n' 'A re-registered after the restart' >&2
+	fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
+	grep -E 'AUTHENTICATE|90[0-9] ' "$WORK/a.trace" >&2 || true
 	echo "live run failed; ergo log tail:" >&2
 	tail -5 "$WORK/ergo.log" >&2
 	exit 1

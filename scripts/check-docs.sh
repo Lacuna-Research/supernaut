@@ -422,7 +422,7 @@ fi
 # time a prompt actually needs them — not before.
 # ---------------------------------------------------------------------------
 rule='dep-allowlist'
-DEP_ALLOWLIST=" serde time bitflags clap tokio tokio-util tokio-rustls rustls rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml supernaut supernaut-tui havoc-ipc havoc-core havoc-transport "
+DEP_ALLOWLIST=" serde time bitflags clap tokio tokio-util tokio-rustls rustls rustls-pki-types webpki-roots rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml supernaut supernaut-tui havoc-ipc havoc-core havoc-transport "
 
 # Dependency crate names declared in a Cargo.toml: keys inside any *dependencies*
 # section, plus the `[dependencies.foo]` header form. Does not resolve `package = `

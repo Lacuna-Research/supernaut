@@ -4,7 +4,7 @@
 //! prompt 6 captures live transcripts into this same corpus.
 
 use havoc_core::connection::{Config, Machine, SaslConfig, SaslCredentials, SaslMechanism, State};
-use havoc_ipc::{ConnectionPhase, NetworkId};
+use havoc_ipc::ConnectionPhase;
 
 fn config(sasl: bool) -> Config {
     Config {
@@ -277,49 +277,87 @@ fn welcome_confirms_a_server_modified_nick() {
     assert_eq!(m.nick(), "hvc_");
 }
 
-/// Actor-level test replacing the old map-of-machines test: the `Networks`
-/// map now holds actor handles (one map from commit one, §6.9), and an actor
-/// pointed at a dead port reports Connecting then Disconnected with a detail —
-/// the seam prompt 6's backoff policy will drive.
-#[tokio::test]
-async fn actor_map_reports_connecting_then_disconnected() {
-    use havoc_core::connection::Networks;
-    use havoc_core::connection::actor::{self, ActorReport, ActorSpawn};
-
-    let (reports_tx, mut reports) = tokio::sync::mpsc::channel(16);
-    let mut networks = Networks::default();
-    // Reserved port with nothing listening: connect must fail fast.
-    let handle = actor::spawn(ActorSpawn {
-        network: NetworkId(1),
-        host: "127.0.0.1".to_owned(),
-        port: 9,
-        config: config(false),
-        reports: reports_tx,
-        trace: false,
-    });
-    networks.insert(NetworkId(1), handle);
-    assert_eq!(networks.iter().count(), 1);
-
-    let (id, first) = reports.recv().await.expect("connecting report");
-    assert_eq!(id, NetworkId(1));
-    assert!(matches!(
-        first,
-        ActorReport::Phase {
-            phase: ConnectionPhase::Connecting,
-            ..
-        }
-    ));
-    let (_, second) = reports.recv().await.expect("disconnect report");
-    match second {
-        ActorReport::Phase {
-            phase: ConnectionPhase::Disconnected,
-            detail,
-        } => assert!(detail.is_some(), "a failed connect must say why"),
-        other => panic!("expected Disconnected, got {other:?}"),
+/// Live-captured transcript: ergo 2.19.1 over TLS with SASL PLAIN, harvested
+/// from `.cache/last-a.trace` via `scripts/trace-to-steps.sh` (2026-08-10)
+/// and trimmed to the registration core. The credentials are the harness's
+/// recognisably-fake pair. The raced user-command JOIN the converter warns
+/// about was dropped in review; this config has no autojoin, matching the
+/// captured session.
+#[test]
+fn live_ergo_registration() {
+    let mut config = config(true);
+    config.nick = "alice".to_owned();
+    config.username = "alice".to_owned();
+    config.autojoin = Vec::new();
+    if let Some(sasl) = &mut config.sasl {
+        sasl.credentials.authcid = "alice".to_owned();
+        sasl.credentials.password = "fake-livetest-passw0rd".to_owned();
     }
-    networks
-        .get(NetworkId(1))
-        .expect("handle present")
-        .task
-        .abort();
+    let (mut m, opening) = Machine::start(config);
+    assert_eq!(opening[0], "CAP LS 302");
+
+    run(
+        &mut m,
+        &[
+            Step(
+                ":liverun.localhost CAP * LS * :account-notify account-tag away-notify batch cap-notify chghost draft/account-registration=before-connect draft/channel-rename draft/chathistory draft/event-playback draft/extended-isupport draft/languages=1,en draft/multiline=max-bytes=4096,max-lines=100 draft/persistence draft/pre-away draft/read-marker draft/whoami echo-message ergo.chat/nope extended-join extended-monitor invite-notify labeled-response message-tags multi-prefix no-implicit-names sasl=PLAIN,EXTERNAL",
+                &[],
+            ),
+            Step(
+                ":liverun.localhost CAP * LS :server-time setname standard-replies userhost-in-names znc.in/playback znc.in/self-message",
+                &["CAP REQ :server-time message-tags echo-message batch labeled-response sasl"],
+            ),
+            Step(
+                ":liverun.localhost NOTICE * :*** Looking up your hostname...",
+                &[],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:50.909Z :liverun.localhost CAP * ACK :server-time message-tags echo-message batch labeled-response sasl",
+                &["AUTHENTICATE PLAIN"],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:50.909Z :liverun.localhost AUTHENTICATE +",
+                &["AUTHENTICATE AGFsaWNlAGZha2UtbGl2ZXRlc3QtcGFzc3cwcmQ="],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.106Z :liverun.localhost 900 * * alice :You are now logged in as alice",
+                &[],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.106Z :liverun.localhost 903 * :Authentication successful",
+                &["CAP END"],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.107Z :liverun.localhost 001 alice :Welcome to the SupernautLiveRun IRC Network alice",
+                &[],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.107Z :liverun.localhost 005 alice AWAYLEN=390 BOT=B CASEMAPPING=ascii CHANLIMIT=#:100 CHANMODES=Ibe,k,fl,CEMRUimnstu CHANNELLEN=64 CHANTYPES=# CHATHISTORY=100 ELIST=U EXCEPTS EXTBAN=,m FORWARD=f INVEX :are supported by this server",
+                &[],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.107Z :liverun.localhost 005 alice KICKLEN=390 MAXLIST=beI:60 MAXTARGETS=4 MODES MONITOR=100 MSGREFTYPES=msgid,timestamp NETWORK=SupernautLiveRun NICKLEN=32 PREFIX=(qaohv)~&@%+ SAFELIST SAFERATE STATUSMSG=~&@%+ TARGMAX=NAMES:1,LIST:1,KICK:,WHOIS:1,USERHOST:10,PRIVMSG:4,TAGMSG:4,NOTICE:4,MONITOR:100 :are supported by this server",
+                &[],
+            ),
+            Step(
+                "@time=2026-08-10T08:35:51.107Z :liverun.localhost 422 alice :MOTD File is missing",
+                &[],
+            ),
+        ],
+    );
+
+    assert_eq!(*m.state(), State::Steady);
+    assert_eq!(m.phase(), ConnectionPhase::Registered);
+    assert!(m.enabled_caps().contains("server-time"));
+    assert!(m.enabled_caps().contains("sasl"));
+    assert_eq!(m.nick(), "alice");
+    assert_eq!(
+        m.isupport().get("NETWORK").map(String::as_str),
+        Some("SupernautLiveRun")
+    );
+    assert_eq!(
+        m.isupport().get("UTF8ONLY"),
+        None,
+        "third 005 line was trimmed"
+    );
 }

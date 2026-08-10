@@ -18,6 +18,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::bus::{Bus, ClientId, Directed};
 use crate::connection::actor::{self, ActorCommand, ActorReport, ActorSpawn};
+use crate::connection::io::Security;
 use crate::connection::{Config as ConnectionConfig, Networks};
 use crate::storage::StorageClient;
 
@@ -28,6 +29,7 @@ pub struct NetworkSettings {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub security: Security,
     pub connection: ConnectionConfig,
 }
 
@@ -193,6 +195,7 @@ async fn connect(state: &mut CoreState, network: NetworkId) -> ResponseBody {
         network,
         host: settings.host.clone(),
         port: settings.port,
+        security: settings.security.clone(),
         config: settings.connection.clone(),
         reports: state.reports_tx.clone(),
         trace: state.trace,
