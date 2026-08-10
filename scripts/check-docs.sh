@@ -20,7 +20,7 @@ set -euo pipefail
 CLAUDE_MAX_LINES=100
 
 # Directory whose changes require a BUILD-LOG.md entry.
-SOURCE_DIR="src"
+SOURCE_DIR="crates"
 
 # A prompt over this many changed lines (added + removed, within SOURCE_DIR) needs an
 # explicit `**Oversize:**` justification in its build-log entry. The number is a
@@ -36,7 +36,7 @@ CATEGORY_LIMIT=3
 # Add a line when a stage opens. Do not remove finished stages — their carry-forward,
 # status and retrospective checks still have to hold.
 STAGES=(
-	"1:STAGE-1-PROMPTS.md:11"
+	"1:STAGE-1-PROMPTS.md:10"
 	# "2:STAGE-2-PROMPTS.md:18"
 )
 
@@ -410,23 +410,60 @@ if [ -f ratchets.txt ] && [ -x scripts/measure-ratchets.sh ]; then
 fi
 
 # ---------------------------------------------------------------------------
-# 15. Dependency policy.
+# 15. Dependency policy: every crate dependency comes from the allowlist below.
 #
 # Each dependency is attack surface and maintenance burden. Adding one means a decision
-# entry in BUILD-LOG.md and an edit to this check — the edit is the point, because it
-# makes the exception visible in a diff rather than invisible in a lockfile.
+# entry in BUILD-LOG.md and an edit to this allowlist — the edit is the point, because
+# it makes the exception visible in a diff rather than invisible in a lockfile.
 #
-# Replace the body with whatever "an undeclared dependency" means for this toolchain.
-# Delete the check entirely if the project has no such policy; do not leave it passing
-# vacuously, because a check that cannot fail is a check nobody knows stopped running.
+# Seeded with exactly the crates NORTH-STAR.md §5 commits to for v1, plus the
+# workspace's own crates. Infrastructure crates the north-star does not name
+# (thiserror, tracing, clap, ...) get added here with their decision entry the first
+# time a prompt actually needs them — not before.
 # ---------------------------------------------------------------------------
-# if [ -f <manifest> ]; then
-# 	if grep -qE '<dependency pattern>' <manifest>; then
-# 		err "<manifest> declares an external dependency. Justify it in BUILD-LOG.md and amend this check."
-# 	else
-# 		ok "<manifest> has no external dependencies"
-# 	fi
-# fi
+rule='dep-allowlist'
+DEP_ALLOWLIST=" serde time bitflags tokio tokio-util tokio-rustls rustls rusqlite irc-proto ciborium ratatui crossterm nucleo keyring toml havoc havoc-ipc havoc-core havoc-tui havoc-transport "
+
+# Dependency crate names declared in a Cargo.toml: keys inside any *dependencies*
+# section, plus the `[dependencies.foo]` header form. Does not resolve `package = `
+# renames — a renamed dep still shows its local key, which is what review would see.
+deps_of() {
+	awk '
+		/^\[/ {
+			# [dependencies.foo] names its dep in the header; the body keys
+			# (version, features, ...) are attributes, not dependencies.
+			if (match($0, /dependencies\.[A-Za-z0-9_-]+\]/)) {
+				print substr($0, RSTART + 13, RLENGTH - 14)
+				in_deps = 0
+			} else {
+				in_deps = ($0 ~ /dependencies\]/)
+			}
+			next
+		}
+		in_deps && /^[A-Za-z0-9_-]+[[:space:]]*[=.]/ {
+			split($0, a, /[[:space:]=.]/)
+			print a[1]
+		}
+	' "$1" | sort -u
+}
+
+manifests=$( { find "$SOURCE_DIR" -name Cargo.toml 2>/dev/null || true; } | sort)
+if [ -n "$manifests" ]; then
+	unlisted=""
+	for m in $manifests; do
+		for d in $(deps_of "$m"); do
+			case "$DEP_ALLOWLIST" in
+			*" $d "*) ;;
+			*) unlisted="$unlisted $m:$d" ;;
+			esac
+		done
+	done
+	if [ -n "$unlisted" ]; then
+		err "dependencies outside the allowlist:${unlisted}. Add a decision entry to BUILD-LOG.md and amend DEP_ALLOWLIST in this script."
+	else
+		ok "all crate dependencies are on the allowlist"
+	fi
+fi
 
 # ---------------------------------------------------------------------------
 # 16. Project-specific checks.
@@ -437,13 +474,56 @@ fi
 # comment saying what went wrong and why the check is shaped the way it is; a check
 # whose reason is undocumented is a check somebody deletes when it becomes
 # inconvenient. And add a fixture to scripts/test-checks.sh in the same PR.
-#
-# Things worth checking, from experience:
-#   - a generated artefact (diagram, table, ASCII art) matching its generator
-#   - a published site or docs branch matching its source directory
-#   - an architectural boundary (a module that must not import a platform API)
-#   - a version or identifier written down in more than one place
 # ---------------------------------------------------------------------------
+
+# 16a. Crate dependency boundaries — NORTH-STAR.md §4.2, pitfall 2.
+#
+# "The dependency graph *is* the architecture." The predicted failure is someone
+# adding rusqlite to havoc-tui "just for this one query", which is the first step of
+# the erosion that makes the daemon split a rewrite. The crate graph enforces this at
+# compile time only once the dep is used; this check fails at the moment it is
+# *declared*, which is earlier and names the rule being broken. Declared-only (grep on
+# Cargo.toml, not cargo-metadata) is deliberate: zero toolchain dependence, and the
+# transitive graph is the compiler's job.
+rule='crate-boundary'
+check_boundary() { # <manifest> <forbidden dep>...
+	m=$1
+	shift
+	[ -f "$m" ] || return 0
+	viol=""
+	for d in $(deps_of "$m"); do
+		for f in "$@"; do
+			[ "$d" = "$f" ] && viol="$viol $d"
+		done
+	done
+	if [ -n "$viol" ]; then
+		err "$m declares${viol} — forbidden by the crate boundaries in NORTH-STAR.md §4.2. Move the need behind havoc-ipc types instead."
+	else
+		ok "$m respects its crate boundary"
+	fi
+}
+check_boundary "$SOURCE_DIR/havoc-tui/Cargo.toml" rusqlite rustls tokio-rustls irc-proto
+check_boundary "$SOURCE_DIR/havoc-core/Cargo.toml" ratatui crossterm termion termwiz
+check_boundary "$SOURCE_DIR/havoc-transport/Cargo.toml" rusqlite ratatui crossterm irc-proto
+
+# havoc-ipc is the inverse: near-zero deps, so it is an allowlist, not a blocklist.
+# Anything beyond serde/time/bitflags means a type or concern is leaking into the
+# wire-format crate that belongs in core or transport.
+if [ -f "$SOURCE_DIR/havoc-ipc/Cargo.toml" ]; then
+	IPC_ALLOWLIST=" serde time bitflags "
+	ipc_extra=""
+	for d in $(deps_of "$SOURCE_DIR/havoc-ipc/Cargo.toml"); do
+		case "$IPC_ALLOWLIST" in
+		*" $d "*) ;;
+		*) ipc_extra="$ipc_extra $d" ;;
+		esac
+	done
+	if [ -n "$ipc_extra" ]; then
+		err "havoc-ipc declares${ipc_extra} — it is capped at serde/time/bitflags (NORTH-STAR.md §4.2). Wire types stay near zero-dep."
+	else
+		ok "havoc-ipc stays near zero-dep"
+	fi
+fi
 
 if [ "$fail" -ne 0 ]; then
 	printf '\nDocumentation discipline failed.\n' >&2

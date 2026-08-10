@@ -172,3 +172,83 @@ What is next, and whether it has carry-forward notes waiting.>
 ```
 
 ---
+
+## Decision — bootstrap: adapt dev-template for HAVOC
+**Date:** 2026-08-09  **Affects:** CLAUDE.md, scripts/check-docs.sh, scripts/measure-ratchets.sh, scripts/test-checks.sh, Makefile, README.md
+
+**Chose:** `SOURCE_DIR=crates` (cargo workspace under `crates/`); dependency policy as
+an allowlist in check 15 seeded with exactly the crates NORTH-STAR.md §5 commits to
+for v1 plus the workspace's own crates; the NORTH-STAR §4.2 crate boundaries as
+mechanical checks on the Cargo.tomls (check 16a) — blocklists for havoc-tui /
+havoc-core / havoc-transport, a strict serde/time/bitflags allowlist for havoc-ipc.
+Both checks parse *declared* dependencies with awk over Cargo.toml.
+**Over:** seeding the allowlist with obviously-coming infra crates (thiserror,
+tracing, clap); using cargo-metadata for a resolved dependency graph.
+**Because:** the north-star is already the decision log for its named dependencies, so
+they need no new entries — but anything it does not name should pay the designed cost
+(decision entry + allowlist edit) at the moment it is actually needed, not be waved
+through in bulk now. Declared-not-resolved parsing keeps the check free of a toolchain
+dependency; the transitive graph is the compiler's job once a dep is used, and the
+failure this check exists for — "rusqlite in havoc-tui just for one query" — is a
+declaration.
+**Revisit if:** a `package = "..."` rename ever hides a real dependency from the awk
+parser (then move to cargo-metadata), or per-dep friction proves so high it invites
+batch additions.
+
+## Decision — bootstrap: Makefile stays unadapted until the workspace exists
+**Date:** 2026-08-09  **Affects:** Makefile, .github/workflows/ci.yml, stage 1 prompt 1
+
+**Chose:** leave the `build`/`test`/`fmt`/`lint` placeholder bodies in place for the
+bootstrap PR; stage 1's first prompt scaffolds the cargo workspace and fills them in
+the same change.
+**Over:** filling in cargo commands now.
+**Because:** with no Cargo.toml in the tree, adapted bodies make CI's build job fail
+red on a docs-only PR, and the template's build job is designed to skip loudly —
+keyed on the placeholder text — for exactly this window. Cargo commands without a
+workspace would also be untestable on this machine (no Rust toolchain installed yet).
+**Revisit if:** never — this resolves itself when prompt 1 lands.
+
+## Decision — bootstrap: ratchet baselines and README apparatus
+**Date:** 2026-08-09  **Affects:** ratchets.txt, README.md
+
+**Chose:** keep the template's ratchets (`todo-count 0`, `longest-file 400`) as
+starting ceilings, and a README without the stage badge / progress table.
+**Because:** with zero source, measured values are 0 — a `longest-file 0` ceiling
+would fail on the first file, so 400 is a policy cap, consistent with the north-star's
+bias for small isolated modules; `todo-count 0` means deferred work lives in PLAN.md,
+not in comments. The README progress apparatus is opt-in by design and a private
+working repo does not earn its per-prompt upkeep; the badge can be added later, at
+which point the checks engage on their own.
+**Revisit if:** the first retrospective finds the ratchets never fired (tighten or
+replace with Rust-specific rot metrics, e.g. unwrap-count outside tests).
+
+## Decision — plan bootstrap: PLAN.md and the stage-1 queue adopted
+**Date:** 2026-08-09  **Affects:** PLAN.md, STAGE-1-PROMPTS.md, scripts/check-docs.sh (STAGES), scripts/test-checks.sh
+
+**Chose:** the Plan bootstrap sub-agent's proposal (inputs: NORTH-STAR.md plus the
+template format references, per SUBAGENT-BRIEFS.md), adopted without edits. Its
+judgment calls, each reviewed and accepted: stage 1 merges NORTH-STAR §8's M1+M2 (a
+core that connects but stores nothing is not usable; a headless logger with instant
+search is); the dogfood month is its own stage with a grown-not-planned queue; M7+ is
+a menu inside stage 6, not commitments; storage-on-a-dedicated-thread treated as
+settled by §6.6 rather than §5.1's looser either-or; the reconnect state ships as a
+named seam in prompt 4 with resync deferred to stage 5, resolving §4.4 vs §8; two
+Still-open items beyond §9 (migration mechanism, SASL mechanism set); prompt 5 gets a
+plain-TCP-to-local-ergo connector behind a loud explicit flag one prompt before TLS,
+read as §2.3-compliant because the opt-in is loud and the peer is localhost — accepted
+to front-load the live-run harness; ergo is a test-harness binary, not a crate
+dependency, so it stays off the allowlist; the extra `**Branch:**` line per prompt is
+kept (no check parses it). STAGES total set to 10 and the fixture builder's sed synced
+in the same change, per the queue file's own comment.
+**Over:** folding live connect entirely into prompt 6 (rejected: every prompt from 5
+on then lacks a live-run harness for one more session), and upgrading the later-stage
+Still-open items to machine-readable blocking form (rejected for now: the checker only
+enforces stages listed in STAGES, so the prose pointers are the honest form until
+those queues exist).
+**Because:** the proposal maps cleanly onto the north-star with no silent
+resolutions — every ambiguity it found landed in Still open, which is exactly the
+contract. From this moment `PLAN.md` is authoritative for the roadmap; NORTH-STAR.md
+holds the why, and divergence gets a decision entry.
+**Carry-forward consumed:** none in truth — the removed block was the placeholder
+example in the template's queue file (`Prompt <K+1>`), deleted wholesale when the real
+stage-1 queue replaced the placeholder. No live note existed to consume.
