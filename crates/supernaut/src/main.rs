@@ -1,20 +1,71 @@
 //! The Supernaut binary: arg parsing, wiring, mode selection — per NORTH-STAR
 //! §4.2 and its naming amendment (Supernaut app, havoc engine).
 
+mod session;
+mod wiring;
+
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use clap::Parser;
 use havoc_core::storage::Storage;
 
+#[derive(Parser, Debug)]
+#[command(name = "supernaut", version, disable_help_subcommand = true)]
+struct Cli {
+    /// Where history lives. Defaults to $XDG_DATA_HOME/supernaut.
+    #[arg(long, global = true)]
+    data_dir: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand, Debug)]
+enum Command {
+    /// Debug session: drive the havoc engine over the typed boundary.
+    Session(session::SessionArgs),
+}
+
 fn main() -> ExitCode {
+    let cli = Cli::parse();
+    match cli.command {
+        None => open_store_and_report(cli.data_dir),
+        Some(Command::Session(mut args)) => {
+            if args.data_dir.is_none() {
+                args.data_dir = cli.data_dir;
+            }
+            let runtime = match tokio::runtime::Runtime::new() {
+                Ok(rt) => rt,
+                Err(error) => {
+                    eprintln!("runtime: {error}");
+                    return ExitCode::FAILURE;
+                }
+            };
+            match runtime.block_on(session::run(args)) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(message) => {
+                    eprintln!("{message}");
+                    ExitCode::FAILURE
+                }
+            }
+        }
+    }
+}
+
+/// The no-subcommand path — prompt 3's documented acceptance, byte for byte:
+/// print name/version, open (creating/migrating) the store, report, exit 0.
+fn open_store_and_report(data_dir: Option<PathBuf>) -> ExitCode {
     println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
-    let data_dir = match data_dir_from_args(std::env::args().skip(1)) {
-        Ok(dir) => dir,
-        Err(message) => {
-            eprintln!("{message}");
-            return ExitCode::FAILURE;
-        }
+    let data_dir = match data_dir {
+        Some(dir) => dir,
+        None => match default_data_dir() {
+            Ok(dir) => dir,
+            Err(message) => {
+                eprintln!("{message}");
+                return ExitCode::FAILURE;
+            }
+        },
     };
 
     if let Err(error) = std::fs::create_dir_all(&data_dir) {
@@ -33,7 +84,7 @@ fn main() -> ExitCode {
             } else {
                 "up-to-date".to_owned()
             };
-            let version = storage.schema_version().unwrap_or(-1);
+            let version = storage.client().schema_version().unwrap_or(-1);
             println!(
                 "history: {} (schema v{version}, {state})",
                 db_path.display()
@@ -47,25 +98,7 @@ fn main() -> ExitCode {
     }
 }
 
-/// `--data-dir <path>` overrides the default of `$XDG_DATA_HOME/supernaut`
-/// (falling back to `~/.local/share/supernaut`, the XDG default). Hand-parsed:
-/// the surface is one flag, and an argument-parsing dependency is not yet
-/// justified (CLAUDE.md dependency policy).
-fn data_dir_from_args(mut args: impl Iterator<Item = String>) -> Result<PathBuf, String> {
-    match args.next().as_deref() {
-        None => default_data_dir(),
-        Some("--data-dir") => match args.next() {
-            Some(dir) if args.next().is_none() => Ok(PathBuf::from(dir)),
-            Some(_) => Err("unexpected extra arguments after --data-dir <path>".to_owned()),
-            None => Err("--data-dir requires a path".to_owned()),
-        },
-        Some(other) => Err(format!(
-            "unknown argument: {other}\nusage: supernaut [--data-dir <path>]"
-        )),
-    }
-}
-
-fn default_data_dir() -> Result<PathBuf, String> {
+pub(crate) fn default_data_dir() -> Result<PathBuf, String> {
     if let Some(xdg) = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()) {
         return Ok(PathBuf::from(xdg).join("supernaut"));
     }

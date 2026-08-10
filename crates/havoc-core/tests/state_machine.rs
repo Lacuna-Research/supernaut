@@ -3,9 +3,7 @@
 //! assertions. Hand-written from real-server behavior (Libera/ergo shapes);
 //! prompt 6 captures live transcripts into this same corpus.
 
-use havoc_core::connection::{
-    Config, Machine, Networks, SaslConfig, SaslCredentials, SaslMechanism, State,
-};
+use havoc_core::connection::{Config, Machine, SaslConfig, SaslCredentials, SaslMechanism, State};
 use havoc_ipc::{ConnectionPhase, NetworkId};
 
 fn config(sasl: bool) -> Config {
@@ -279,15 +277,49 @@ fn welcome_confirms_a_server_modified_nick() {
     assert_eq!(m.nick(), "hvc_");
 }
 
-#[test]
-fn disconnect_seam_and_the_actor_map() {
-    let mut networks = Networks::default();
-    let (machine, _) = Machine::start(config(false));
-    networks.insert(NetworkId(1), machine);
+/// Actor-level test replacing the old map-of-machines test: the `Networks`
+/// map now holds actor handles (one map from commit one, §6.9), and an actor
+/// pointed at a dead port reports Connecting then Disconnected with a detail —
+/// the seam prompt 6's backoff policy will drive.
+#[tokio::test]
+async fn actor_map_reports_connecting_then_disconnected() {
+    use havoc_core::connection::Networks;
+    use havoc_core::connection::actor::{self, ActorReport, ActorSpawn};
 
-    let m = networks.get_mut(NetworkId(1)).expect("present");
-    m.on_disconnect();
-    assert_eq!(*m.state(), State::Disconnected);
-    assert_eq!(m.phase(), ConnectionPhase::Disconnected);
+    let (reports_tx, mut reports) = tokio::sync::mpsc::channel(16);
+    let mut networks = Networks::default();
+    // Reserved port with nothing listening: connect must fail fast.
+    let handle = actor::spawn(ActorSpawn {
+        network: NetworkId(1),
+        host: "127.0.0.1".to_owned(),
+        port: 9,
+        config: config(false),
+        reports: reports_tx,
+        trace: false,
+    });
+    networks.insert(NetworkId(1), handle);
     assert_eq!(networks.iter().count(), 1);
+
+    let (id, first) = reports.recv().await.expect("connecting report");
+    assert_eq!(id, NetworkId(1));
+    assert!(matches!(
+        first,
+        ActorReport::Phase {
+            phase: ConnectionPhase::Connecting,
+            ..
+        }
+    ));
+    let (_, second) = reports.recv().await.expect("disconnect report");
+    match second {
+        ActorReport::Phase {
+            phase: ConnectionPhase::Disconnected,
+            detail,
+        } => assert!(detail.is_some(), "a failed connect must say why"),
+        other => panic!("expected Disconnected, got {other:?}"),
+    }
+    networks
+        .get(NetworkId(1))
+        .expect("handle present")
+        .task
+        .abort();
 }
