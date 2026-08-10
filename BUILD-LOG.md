@@ -277,3 +277,24 @@ transport crates sit on the engine side of that boundary, so they keep its name.
 **Revisit if:** the stage-4 daemon work finds the two-name split confusing in
 `--help`/docs; the fallback is `supernaut`-everything, which stays a mechanical
 rename of two crate names while the engine crates are pre-1.0.
+
+## Decision — README grows the checked progress apparatus, features, and roadmap
+**Date:** 2026-08-09  **Affects:** README.md, every future prompt PR (badge + table upkeep)
+
+**Chose:** opt in to the template's README progress apparatus — the stage badge and
+per-prompt progress table that check 6 verifies against the queue's status line on
+every commit — plus a features section (framed explicitly as design goals; nothing
+runs yet) and a stages overview of one-liners pointing at PLAN.md as authoritative.
+This partially supersedes the bootstrap decision that kept the README badge-less:
+that reasoning was "a private working repo does not earn the per-prompt upkeep", and
+the repo has since gone public at the user's direction — the public front door is
+exactly the case the template says earns it. Every prompt PR now also bumps the badge
+and flips a table row, or CI fails; that friction is the point.
+**Over:** a prose-only roadmap copy of PLAN.md's stages (drifts, and the copy nobody
+edits is the one that gets read), or linking to PLAN.md with no summary at all
+(honest but useless as a front door).
+**Because:** the only roadmap the README can carry honestly is one a machine keeps
+honest; everything unchecked in it (features, ethos) is deliberately timeless prose
+that does not go stale per-prompt.
+**Revisit if:** the badge/table upkeep is repeatedly forgotten and CI-caught —
+that is the signal to automate the bump in a hook rather than to remove the claims.
