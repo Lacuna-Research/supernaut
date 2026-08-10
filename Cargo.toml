@@ -1,0 +1,28 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/havoc-ipc",
+    "crates/havoc-core",
+    "crates/havoc-transport",
+    "crates/supernaut-tui",
+    "crates/supernaut",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+repository = "https://github.com/Lacuna-Research/supernaut"
+
+[workspace.dependencies]
+havoc-ipc = { path = "crates/havoc-ipc" }
+havoc-core = { path = "crates/havoc-core" }
+havoc-transport = { path = "crates/havoc-transport" }
+supernaut-tui = { path = "crates/supernaut-tui" }
+
+# Zero-warning builds are a rule (CLAUDE.md); the lint config travels with the
+# repo so the rule survives any shell. Every crate opts in via [lints] workspace.
+[workspace.lints.rust]
+warnings = "deny"
+
+[workspace.lints.clippy]
+all = "deny"

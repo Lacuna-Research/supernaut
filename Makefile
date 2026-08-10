@@ -22,18 +22,19 @@ check:
 check-tests:
 	./scripts/test-checks.sh
 
-# --- Replace the bodies below with this project's toolchain. ---------------
-# Keep warnings-as-errors at the build invocation: zero-warnings is a rule, so the
-# compiler should be the thing that enforces it rather than a review comment.
+# --- Toolchain: Rust stable. -----------------------------------------------
+# Warnings-as-errors lives in [workspace.lints] in Cargo.toml, so the rule travels
+# with the repo rather than the shell; these bodies stay plain cargo invocations.
 
 build:
-	@echo "TODO: build" && false
+	cargo build --workspace
 
 test:
-	@echo "TODO: test" && false
+	cargo test --workspace
 
 fmt:
-	@echo "TODO: format in place" && false
+	cargo fmt --all
 
 lint:
-	@echo "TODO: format lint --strict" && false
+	cargo fmt --all -- --check
+	cargo clippy --workspace --all-targets -- -D warnings

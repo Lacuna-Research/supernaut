@@ -1,0 +1,14 @@
+[package]
+name = "supernaut"
+version.workspace = true
+edition.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+havoc-ipc.workspace = true
+havoc-core.workspace = true
+havoc-transport.workspace = true
+supernaut-tui.workspace = true
