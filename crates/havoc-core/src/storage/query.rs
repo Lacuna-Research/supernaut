@@ -88,6 +88,11 @@ fn hydrate(raw: RawRow) -> Result<Option<(BufferId, StoredMessage)>, String> {
     )))
 }
 
+/// The `in:` filter matches `buffer.name` with **no network scope** — the
+/// `SELECT id FROM buffer WHERE name = ?3` below is the union, deliberately: see
+/// [`SearchSpec::buffer`] for why stage 2's `/search` owns the scoping grammar,
+/// and `in_filter_unions_one_buffer_name_across_networks` for the test that pins
+/// it.
 pub(super) fn run_search(
     conn: &Connection,
     spec: &SearchSpec,

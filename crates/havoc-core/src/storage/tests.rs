@@ -176,6 +176,54 @@ fn fts_trigger_syncs_and_dedup_indexes_nothing() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// `in:` is a buffer-**name** filter with no network scope, so one channel name
+/// unions histories across networks. Pinned rather than fixed (prompt 10a): the
+/// union is real, the grammar for scoping it is stage 2's `/search`, and this
+/// test is what turns "we know" into a failing test when that lands.
+#[test]
+fn in_filter_unions_one_buffer_name_across_networks() {
+    let (dir, storage, client) = temp_store();
+    let a = client.ensure_network("net-a").expect("network a");
+    let b = client.ensure_network("net-b").expect("network b");
+    assert_ne!(a.0, b.0, "two rows, or the test is vacuous");
+    let (tx, mut rx) = tokio::sync::mpsc::channel(16);
+
+    // Same target (`#supernaut`, from `item`), different network rows.
+    client
+        .ingest(
+            NetworkId(1),
+            a,
+            item(Some("a1"), "unionable line", 1_000),
+            tx.clone(),
+        )
+        .expect("send");
+    client
+        .ingest(
+            NetworkId(2),
+            b,
+            item(Some("b1"), "unionable line", 2_000),
+            tx,
+        )
+        .expect("send");
+    drain(&mut rx, 2);
+
+    let hits = search_hits(&client, "in:#supernaut unionable");
+    assert_eq!(
+        hits.len(),
+        2,
+        "in: is unscoped: both networks' #supernaut match"
+    );
+    let buffers: std::collections::BTreeSet<i64> = hits.iter().map(|(b, _)| b.0).collect();
+    assert_eq!(
+        buffers.len(),
+        2,
+        "two distinct buffer rows sharing one name"
+    );
+
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The rollback story: a mid-batch FK failure rolls the whole batch —
 /// message rows, FTS rows, and the writer caches — and a clean re-ingest
 /// starts at seq 1 and is searchable.

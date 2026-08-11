@@ -3,6 +3,7 @@
 //! (Supernaut app, havoc engine). Never depends on anything terminal.
 
 pub mod bus;
+pub mod config;
 pub mod connection;
 pub mod core;
 pub mod search;

@@ -239,6 +239,7 @@ mod tests {
         let (_in_tx, incoming) = mpsc::channel(4);
         let mut state = SessionState {
             transport: InProcess { requests, incoming },
+            network: havoc_ipc::NetworkId(1),
             next_request: 2,
             buffers: HashMap::new(),
             msg_counts: HashMap::new(),

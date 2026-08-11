@@ -1838,3 +1838,350 @@ loop can still park on the storage thread and `reads_tx` now has three producers
 the existing byte-accounting note). One to PLAN stage 2 item 1 (`around-hit`'s
 same-lane dependency). One rejected (the `Awaited::from` note, above). The
 config-vs-runtime-state answer is its own decision entry above, not a note.
+
+## Decision — the config schema is a map keyed by network name, and ids come from the loader
+
+**Date:** 2026-08-10  **Affects:** `crates/havoc-core/src/config.rs`, and the
+"caller-assigned ids" phrase in prompt 10a's stub
+
+**Chose:** `[networks.<name>]` tables in a `BTreeMap<String, NetworkEntry>`, with
+`NetworkId(1..N)` assigned by the loader in name order and **no `id` key in the
+schema**. The table key *is* the stable network name — the same string
+`ensure_network` keys the `network` table on — so config identity and storage
+identity are one thing rather than two that must agree.
+**Over:** (a) `[[network]]` array-of-tables with an explicit `name`, which puts name
+uniqueness back in a validation pass somebody has to remember to write; (b) either
+form with a hand-typed `id`, which is exactly the config ceremony NORTH-STAR §2.1
+calls a failed product — and a uniqueness rule plus a migration story on top; (c)
+ids hashed from the name, which trades renumbering for collisions and makes the
+`network=1` in every live-run assertion unreadable.
+**Because:** two `[networks.libera]` tables are a **TOML-level error**, so name
+uniqueness is enforced by the *file format* and is unrepresentable in the parsed
+type. That is what discharged prompt 9a's note without adding a check: `announce`
+builds its `HashMap<&str, NetworkId>` exactly as before, and there is nothing to
+assert because there is nothing to represent. Ids stay "caller-assigned" in the
+sense core.rs means — assigned outside the engine, a distinct type from the storage
+row id — but the assigner is the loader, not a human.
+**The precondition was checked, not assumed:** no wire `NetworkId` is ever
+persisted. `ensure_network` (`crates/havoc-core/src/storage/rows.rs`) keys on name,
+`buffer.network_id` references the storage row, and `CoreState.network_rows` is
+rebuilt at every `connect`. So renumbering across runs — add a network alphabetically
+first and every id shifts — is unobservable. Names are case-sensitive, matching the
+`network.name TEXT UNIQUE` column's default collation: `Libera` and `libera` are two
+networks and two rows, deliberately and consistently.
+**Revisit if:** a wire `NetworkId` is ever persisted or cached across restarts (a
+config-id cache, a NetworkId in a saved layout, a marker table keyed by it). Then
+renumbering becomes data corruption, the id becomes a config field, and the
+uniqueness rule and migration arrive with it. Recorded as a PLAN stage 5 note so the
+condition is checked where multi-network config is built, not remembered here.
+
+## Decision — `toml` + `serde` in havoc-core, deliberately without the serializer
+
+**Date:** 2026-08-10  **Affects:** `crates/havoc-core/Cargo.toml`
+
+**Chose:** `toml = { version = "1.1.4", default-features = false, features = ["std",
+"parse", "serde"] }` and `serde = { version = "1", features = ["derive"] }` in
+havoc-core. Both were already on `DEP_ALLOWLIST` in `scripts/check-docs.sh`, seeded
+from NORTH-STAR §5, so no allowlist edit and therefore no `scripts/test-checks.sh`
+fixture is owed — but the decision entry is.
+**Over:** (a) hand-rolling a TOML subset, rejected outright: quoting, escapes, dotted
+keys, multiline strings, datetimes, and error spans are a commodity, and ours would
+be the buggy one — in the file a user hand-edits, where a wrong parse is a wrong
+connection; (b) `toml` with default features, which is the interesting rejection.
+**Because:** dropping `display` means the **serializer is not compiled in**, so "the
+program never writes the config file" (the 2026-08-10 config-vs-runtime-state
+decision) becomes a capability the crate does not have rather than a rule it obeys.
+Verified rather than assumed, since a feature name that silently does nothing would
+make the claim false and invisible: a throwaway example calling `toml::to_string`
+fails to compile with *"found an item that was configured out … gated behind the
+`display` feature"*. `parse` and `serde` are both needed — `parse` for the text, and
+`serde` for `Deserialize` plus `toml::Table`, which the credential-key scan walks.
+**The transitive set**, named because the allowlist check reads *declared* deps only,
+so hygiene here is an argument and not a check: `toml_parser`, `winnow`,
+`toml_datetime`, `serde_spanned`, `serde_core`. Five crates, all from the same
+maintainer as `toml` itself, no build scripts, no proc macros beyond `serde_derive`
+(already in the tree via havoc-ipc). `winnow` is the only genuinely new lineage.
+**Revisit if:** a "save this to config" action is ever wanted (stage 2's first-run is
+the only plausible caller). That needs `display` back, which needs this entry
+revisited *and* the config-vs-runtime-state decision revisited — two gates, on
+purpose, because a silent config rewrite is the failure mode both exist to prevent.
+
+## Decision — the debug CLI's whole connection surface moves into config; the six flags are deleted
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/session.rs`,
+`scripts/live-run.sh`
+
+**Chose:** `--host`, `--port`, `--nick`, `--join`, `--tls-ca` and
+`--allow-plaintext` are **deleted**. `supernaut session` reads
+`$SUPERNAUT_CONFIG_DIR/config.toml` (then `XDG_CONFIG_HOME`, then `$HOME/.config`)
+and fails if it is absent. What remains is `--network <name>` (optional when the file
+names exactly one), plus `--data-dir`, `--trace-irc` and `--sasl` — the first two
+because they are location and diagnostics rather than seed data, the third because
+prompt 10b deletes it together with the keyring that replaces it.
+**Over:** (a) flags as a fallback when config is absent, which is the real trap:
+live-run.sh would keep exercising the flags and config — the surface every later
+stage builds on — would be the decorative path, green in CI and untested in fact;
+(b) auto-writing a default config file on first run, forbidden by the governing
+decision, and the exact behaviour that makes "config paths are public API" a lie;
+(c) keeping `--allow-plaintext` beside the per-network `plaintext` key.
+**Because** (c) is the sharpest of the three: **security is per-network, so a
+process-global flag cannot say which network it blesses.** With two networks and one
+flag, the safe reading and the useful reading differ, and neither is expressible. The
+opt-in belongs where the host is. The loopback-only restriction moved with it, from
+`is_loopback` in session.rs into config validation — a string check, not name
+resolution, and that is unchanged.
+**Mandatory config is scoped to `session` only**, which is how NORTH-STAR §3.1's
+"works well before configuration" survives: `supernaut --data-dir <p>` still opens
+the store and reports with no config file anywhere (verified by hand, exit 0). That
+is the whole of the property stage 1 can honestly claim; the product's answer is
+stage 2 item 7, recorded there with both fences (no flags fallback, no silent write).
+**Revisit if:** stage 2's first-run needs a pre-config connect path. The shape then
+is a user-confirmed write, never an implicit one.
+
+## Decision — network identity after config: orphan rows abandoned but reversible, `in:` left unscoped and pinned
+
+**Date:** 2026-08-10  **Affects:** `crates/havoc-core/src/core/reads.rs`,
+`crates/havoc-core/src/search.rs`, `crates/havoc-core/src/storage/query.rs`
+
+**Chose, for the pre-config `debug-<host>` network rows:** abandonment, made visible
+and kept reversible. No migration. `announce`'s silent `continue` over an
+unconfigured network name became one greppable stderr line per skipped network —
+`orphan network <name>: N buffers not announced (not in config)` — counted during the
+loop and printed after it, so a data dir full of orphans stays readable. Reversibility
+is structural, not a feature: storage keys networks on the same stable name config now
+supplies, so adding `[networks."debug-localhost"]` to the file brings those buffers
+back.
+**Over:** migrating `debug-<host>` rows onto config networks by host string. That
+match is a **guess**, and guessing wrong merges two networks' histories
+irreversibly — the one unrecoverable outcome available here. Nobody has irreplaceable
+history in a temp-dir debug row, so the expensive half of the trade buys nothing.
+**Chose, for `in:`:** leave it unscoped, and stop it being an accident. The accretion
+*cause* died with `debug-<host>` (stable names mean one `network` row per network, not
+one per host string), so the cross-network union of one channel name is now real but
+rare. The deferral took its honest form instead of a comment: the behaviour is
+documented on `SearchSpec.buffer` and `run_search`, and **pinned** by
+`in_filter_unions_one_buffer_name_across_networks` — two network rows, one buffer
+name, `in:#supernaut` returns both.
+**Over:** inventing the scoping grammar here. `in:net/#chan` versus a separate
+`network:` filter is a UI question owned by stage 2's `/search`, which is the only
+consumer that can *render* which network a hit came from; the debug CLI prints
+`buffer=<id>`, so a scope filter would be unobservable in the one harness that could
+have tested it. A grammar chosen where it cannot be observed is a grammar chosen
+badly.
+**Honest about the hole this leaves:** orphan history stays reachable through
+`Search`, which has no network filter at all, so a hit can carry a `BufferId` the
+client cannot name. That is the same advisory-not-a-boundary gap PLAN stage 4 already
+owns for `FetchBacklog`, and it is recorded there as a second note rather than fixed
+here — a check that gates search results on the client's config is a real access
+decision, and it belongs with the socket that makes clients plural.
+**Revisit if:** stage 2's `/search` finds the union actively confusing on two
+networks (it should: that is when the pinned test starts failing on purpose), or if
+stage 4 decides the announcement skip is a boundary — then search inherits the same
+rule in the same commit.
+
+## Prompt 10a — Network config file
+
+**Commit:** branch `prompt-10a-config` (PR open)  **Date:** 2026-08-10
+
+**Shipped:** the user's TOML file is now the authority on network identity, and the
+debug CLI has no connection flag left. New `crates/havoc-core/src/config.rs` (243
+lines) owns the schema — top-level `nick`, `[networks.<name>]` with `host`, optional
+`port`, `tls_ca`, `autojoin`, `plaintext` — its validation, and the lowering
+`Config::into_networks() -> HashMap<NetworkId, NetworkSettings>`. It does **no file
+I/O**: `parse(text, base_dir)` so every rule is testable without touching disk, with
+`String` errors because nothing branches on the variant, exactly as `search::parse`.
+Validation, all of it before anything dials and every message naming the network and
+the key: `nick` non-empty and whitespace-free, `host` non-empty, network name
+non-empty, `plaintext` with a non-loopback host, `plaintext` with `tls_ca`. Not
+validated, deliberately: `autojoin` channel names (CHANTYPES is ISUPPORT's, so we
+would be guessing) and `tls_ca`'s existence (the TLS connector reports that once,
+where the failure is). `#[serde(deny_unknown_fields)]` on both structs plus a
+**by-name refusal** for `password`/`pass`/`sasl_password`/`nickserv_password`,
+recursive so `[networks.x] password = …` is caught too. `tls_ca` resolves against the
+config file's own directory. The binary side: `default_config_path` beside
+`default_data_dir` in main.rs (`SUPERNAUT_CONFIG_DIR`, `XDG_CONFIG_HOME`,
+`$HOME/.config`, else an error naming all three), and `session.rs` loses
+`--host`/`--port`/`--nick`/`--join`/`--tls-ca`/`--allow-plaintext` and gains
+`--network <name>`; `const NETWORK: NetworkId = NetworkId(1)` is gone and
+`SessionState` carries the resolved `network`. Core is spawned with **every**
+configured network, not just the selected one. SASL is injected into the selected
+network's `connection.sasl` after lowering, in one marked place, because config lowers
+`sasl: None` always. `announce` reports orphan networks out loud. `SearchSpec.buffer`
+and `run_search` document the unscoped `in:`, pinned by a new storage test. Eleven
+integration tests in `crates/havoc-core/tests/config.rs`. live-run.sh generates a
+config per session and passes no connection flag anywhere; session E is new. No wire
+change (`PROTOCOL_VERSION` stays 1), no storage schema change, no migration. The four
+decisions above were made while doing this and are recorded there.
+
+**Oversize:** 833 changed lines in `crates/` against a cap of 800 — 4% over, and a
+deviation from the detail's own claim that this was "comfortably inside" the tripwire.
+The excess is not a second prompt hiding inside this one: `config.rs` (243) plus
+`tests/config.rs` (256) is 60% of it, and the rest is session.rs's rewrite. **The
+descope ladder was not used, deliberately**, and the reasoning is worth keeping: its
+three rungs (session E and the orphan line, the credential-key refusal list, the `in:`
+pinning test) total roughly 90 lines, so cutting all three would have landed at ~740 —
+under the cap, and having deleted the three things that make this prompt's *claims*
+observable. Session E is the only proof that abandonment is visible; the refusal list
+is the only reason "credentials never live here" is a message rather than a hope; the
+pinned test is the entire content of the `in:` deferral. Trading them for 33 lines
+would be optimising the check instead of the work. Recorded rather than negotiated.
+
+**Learned:** three things, in descending order of how much they would have cost later.
+
+(1) **A feature flag that means "the capability is absent" has to be verified, because
+a wrong feature name fails silently and in the safe-looking direction.** The whole
+"the program cannot write the config file" claim rests on `toml`'s `display` feature
+being off — and if the feature had been renamed between versions, `default-features =
+false` would have quietly compiled anyway, the serializer would have been absent for a
+different reason or present for no reason, and the entry above would have asserted
+something nobody checked. Cost to check: one throwaway `examples/` file calling
+`toml::to_string`, one `cargo build`, and rustc says *"found an item that was
+configured out … gated behind the `display` feature"* by name. That is a general
+shape: **when a dependency's feature set is load-bearing for a safety claim, compile
+the thing you claim is impossible and read the error.**
+
+(2) **The `debug-<host>` naming was not one bug, it was a coupling that three
+different places had quietly organised themselves around** — and moving to config
+names paid all three off at once, which is why the detail's "the row arithmetic is
+preserved exactly" turned out to be the load-bearing sentence rather than a
+reassurance. live-run session D passed `--host localhost` *solely* so its derived
+network name would match A's; the `in:` accretion problem was one `network` row per
+host string; and `announce`'s skip was invisible because a mismatched name was
+routine. Config names deleted the cause of all three. The lesson for reading the
+remaining carry-forward notes: a note that says "X accretes per host string" may not
+need a fix at all once the identity underneath it changes — check whether the *cause*
+died before designing a remedy.
+
+(3) **Two of the detail's four "surfaced rather than resolved silently" tensions were
+discharged by building nothing.** Note 9b's quit hazard needed no drain change,
+because autojoin issues no `Request` and nothing autoconnects — the note travels to
+stage 2's embedded wiring, where the hazard becomes real. Prompt 9a's name-uniqueness
+note needed no validation pass, because the map form makes duplicates a parse error.
+Both were *recorded* as discharged-by-absence rather than silently dropped, which is
+the only way a later session can tell "considered and unnecessary" from "forgotten" —
+and in the 9b case the note itself is now attached to the item that will need it.
+
+**Deviations from the detail, all four:**
+
+- **The multi-network deferral landed under PLAN stage 5 item 1, not stage 6.** The
+  detail said "PLAN stage 6" three times; multi-network is stage 5 item 1 in PLAN.md,
+  and stage 6 is polish/release. Filed where the work actually is.
+- **`parse` deserializes the text twice** — once as `toml::Table` for the
+  credential-key scan, once as `Config`. Deserializing `Config` from the already-parsed
+  `Table` would have been one pass, but `toml`'s span-carrying errors ("TOML parse
+  error at line 4, column 11" with a caret) only exist on the text path, and those
+  spans are the whole value of an error in a hand-edited file. Two passes over a
+  twenty-line file, with the reason in a comment.
+- **session.rs grew rather than shrank** (317 → 353 lines), against the detail's
+  expectation. Four flags' worth of clap fields went away; the config read,
+  `resolve_network` with its candidate-naming error, the security-warning match and
+  the marked SASL injection site are larger than what they replaced. Still 47 lines
+  under the ratchet.
+- **`realname` is a `const` in config.rs, not derived from `nick`.** The detail said
+  `username` and `realname` "stay derived from it in the lowering, as session.rs
+  derives them today" — but session.rs derives only `username`; `realname` has always
+  been the literal `"supernaut debug session"`. Carried verbatim rather than changed,
+  since changing the USER line's realname is an observable protocol change with no
+  benefit in this prompt; the constant says why.
+
+**Measurements:** 833 changed lines in `crates/`, 1306 including live-run.sh and docs.
+Ratchets: `todo-count 0`, `longest-file 363` (session.rs) against a 400 ceiling —
+neither worsened, and no ratchet-forced split was needed for the first time in three
+prompts. `cargo test --workspace`: 69 tests, all green, 11 of them new in
+`tests/config.rs` and 1 in `storage/tests.rs`. Five new transitive crates
+(`toml_parser`, `winnow`, `toml_datetime`, `serde_spanned`, `serde_core`).
+
+**Live run:** `scripts/live-run.sh` — **42/42, exit 0**, up from 40 (session E's two).
+Every session now runs from a generated `config.toml` under its own
+`SUPERNAUT_CONFIG_DIR`; the string `--host` survives in the script only inside the
+comment explaining that it is gone. The claim the detail most wanted checked held
+exactly: **A's join moved from a verb to config autojoin and the row arithmetic did
+not move.** Confirmed from outside the process — `sqlite3` over A's data dir shows
+`#supernaut` seq 1 = alice's autojoin (kind 2), 2 = bob's join, 3 = bob's "the
+deployment failed", 4 = alice's autojoin re-fire after the ergo restart, 5 =
+xyzzysearchtoken — so `wait rows #supernaut 4 10` and the marker assertions on seq 3
+are untouched. One assertion *did* need honest repair, and it was a real hazard rather
+than a cosmetic one: A's post-restart sync grepped `-q 'waited rows #supernaut'`, which
+now matches the *first* autojoin's echo and would have returned instantly, so it became
+a `grep -c … -ge 2` count. The `network` table holds exactly one row, named `liverun`
+(not `debug-localhost`), which is the whole point. Session E, same data dir, config
+naming `[networks.elsewhere]`: `orphan network liverun: 3 buffers not announced (not in
+config)` on stderr, and no `buffer-created … name=#supernaut` — abandonment, observed.
+
+**By-hand acceptance**, all six cases, against a local ergo in an isolated
+`SUPERNAUT_CONFIG_DIR` (script kept at `.cache/p10a/byhand.sh`, gitignored):
+(1) a hand-written config with `nick`, one `[networks.liverun]` table and
+`autojoin = ["#supernaut"]`, run as `session --network liverun --data-dir <tmp>` with
+no connection flag of any kind — registered, and `sqlite3` shows `#supernaut` seq 1 is
+a Join row by `hazel` with no `join` ever typed. Then the four refusals, each before
+anything dialled, each exit 1: (2) a second `[networks.liverun]` table →
+`config: TOML parse error at line 4, column 11 … duplicate key`, with the caret, from
+the format itself; (3) `password = "hunter2"` → *"`password` is never a config key —
+SASL/NickServ credentials live in the OS keyring, never in plaintext in this file"*;
+(4) `plaintext = true` with `host = "bnc.example.net"` → *"network bouncer:
+`plaintext` permits loopback only; bnc.example.net is not 127.0.0.1/::1/localhost"* —
+note this fired *before* `--network liverun` failed to resolve, which is the right
+order: the file is wrong regardless of which network was asked for; (5) no file at all
+→ *"cannot read config <resolved path>: No such file or directory … write the file, or
+point SUPERNAUT_CONFIG_DIR at the directory holding it"*. And (6) `supernaut
+--data-dir <tmp>` with no config file anywhere: name/version and history lines, **exit
+0** — §3.1's works-before-configuration property, still true.
+
+**Review:** pending.
+
+**Carry-forward consumed:** all seven notes attached to prompt 10a, deleted as one act
+with this entry.
+
+- *From prompt 8 — `in:` resolves buffer names across every network row.* Decided, not
+  fixed: unscoped, documented on `SearchSpec.buffer` and `run_search`, and pinned by
+  `in_filter_unions_one_buffer_name_across_networks`. The note's own premise (reused
+  data dirs accrete one `debug-<host>` row per host string) is what died; the union
+  that remains is real, and the grammar is stage 2's. See the fourth decision above.
+  The note's file reference was stale — `run_search` moved from `storage/exec.rs` to
+  `storage/query.rs` in prompt 9a.
+- *From prompt 5 — the debug session hardcodes network identity that config must
+  replace.* `const NETWORK: NetworkId = NetworkId(1)` is deleted; `SessionState.network`
+  is resolved from the file, and the storage network name is the config table key, so
+  `debug-<host>` is gone from the codebase entirely. `debug-*` rows are abandoned, not
+  migrated — visibly and reversibly (fourth decision).
+- *From prompt 6 (config half) — `--tls-ca` and `NetworkSettings.security` are
+  installed base.* `tls_ca` is a per-network config key, resolved against the config
+  file's directory; the loopback-only plaintext rule is rehomed into config validation
+  and `is_loopback` is deleted from session.rs. The note asked where the rule should
+  live; the answer is also that `--allow-plaintext` had to die for it (third decision).
+- *From prompt 9a — `announce` resolves buffers by network name and silently collapses
+  duplicates.* Discharged **by the file format**: two `[networks.x]` tables are a TOML
+  parse error, so the collision is unrepresentable and there is no validation pass to
+  forget. `announce` is unchanged in that respect and gained a doc sentence saying so;
+  the duplicate-table test is what makes it a claim. What *did* change is the silent
+  skip beside it, now a loud orphan line.
+- *From prompt 9b — `quit` blocks on unanswered requests and exits non-zero.*
+  Discharged by absence: this prompt builds no autoconnect, `connect` stays an explicit
+  verb, and autojoin issues no `Request`, so `outstanding` holds exactly what each
+  live-run segment named and the early-quit failure mode is unreachable. The comment
+  above B's `quit` says that, and the warning travels to PLAN stage 2 item 1, where a
+  startup-issued request nobody typed becomes real.
+- *From prompt 9b — `wait message` no longer counts Join rows; `wait rows` does.*
+  Applied: A's autojoin sync is `wait rows #supernaut 1 10`. `wait message` would have
+  hung until a human spoke. This note is why the segment works at all.
+- *From prompt 9a — live-run session D hard-codes `--host localhost` solely because
+  the network name is `debug-<host>`.* Deleted in this same commit, as the note
+  required. D now resolves `#supernaut` because its config names `liverun`, the network
+  A's config named, and the comment says that instead of explaining a host-string
+  accident.
+
+**Carry-forward raised:** two notes to prompt 10b in this file (the single SASL
+injection site its keyring replaces; `sasl_account` must leave the credential-key
+refusal list and enter the schema in one commit, and must *not* be added to that list
+"for symmetry" — an account name is not a secret). Six to PLAN, at the stage where
+each belongs: stage 2 item 1 (autoconnect re-opens 9b's early-quit hazard), stage 2
+item 5 (`in:` scoping is `/search`'s grammar question, naming the pinned test), stage 2
+item 7 (first-run may inherit neither "config is mandatory" nor a silent config write;
+and the loopback-only plaintext rule is stricter than §2.3 asks and relaxing it is that
+item's call — two notes), stage 4 item 1 (`Search` is the second hole in the
+announcement's advisory skip, and needs no id probing), stage 5 item 1 (per-network
+nick, SNI `server_name`, and an explicit config `id` *if* a wire NetworkId is ever
+persisted). One staleness observed and deliberately **not** fixed here, flagged for the
+review instead: PLAN stage 2 item 1's 9a note still says announcements "go out on a
+spawned task", which prompt 9b made inline — staled by 9b, so it is 9b's correction to
+make, not this prompt's silent edit.
