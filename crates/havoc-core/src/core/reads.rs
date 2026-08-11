@@ -130,6 +130,11 @@ pub(super) fn handle_read_outcome(state: &mut CoreState, bus: &mut Bus, outcome:
 /// task to buy. Ordering against broadcast traffic is still not guaranteed; the
 /// contract is that announcements are **idempotent** — a duplicate is legal, a
 /// missing one is not.
+///
+/// That contract holds only while the lane is live. If `direct` reports the lane
+/// gone, the replay is abandoned mid-list: under `Full` the client has been dropped
+/// by policy, so it is not a client owed a complete buffer set any more — it is a
+/// dead session, and finishing the list into a removed lane would say otherwise.
 fn announce(
     state: &mut CoreState,
     bus: &mut Bus,

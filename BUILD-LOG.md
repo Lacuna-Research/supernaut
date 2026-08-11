@@ -1681,3 +1681,160 @@ lane rewrite and the marker cannot be separated, because the marker's Ack-plus-e
 pair is the thing that made "what does half a delivered pair mean" have to be
 answered, and the 65-buffer test proves the policy the marker rides on. Never a
 candidate for trimming: the live run, the 65-buffer attach, the capacity test.
+
+## Decision — config vs. runtime state: the database owns runtime state, config is seed-only
+
+**Date:** 2026-08-10  **Affects:** prompt 10a's whole surface (the TOML schema),
+and PLAN's **Still open** list, from which this item is deleted by this entry
+
+**Chose:** the config file is **read-only seed data** — networks, nick, autojoin —
+applied at startup; everything the program learns, or the user does at runtime
+(joined channels, the buffer set, read markers) lives in the database. **The program
+never writes the config file, ever.** "I joined this channel manually" is database
+state, which the buffer row ingestion already creates; config's `autojoin` list is
+the *seed*, not the record.
+**Over:** config as the mutable source of truth — the program rewriting the user's
+TOML clobbers their comments and formatting, races their own edits, and makes
+"config paths are public API" a lie; and two-way sync, which has both problems plus
+a reconciliation story nobody asked for.
+**Because:** NORTH-STAR §9's stated leaning (database, config as seed only), and the
+same principle already in force elsewhere — the program never writes to its own
+source tree, and the config file is likewise the *user's* document.
+**Revisit if:** dogfood (stage 3) shows users expecting manual joins to become
+autojoin entries — and the answer then would be an explicit "save to config" action,
+never a silent rewrite.
+
+**This unblocks prompt 10a**, whose own text said the question settles there; the
+gate fired one commit earlier than that, on 9b's status bump, which is what forced
+the decision now (see the 9b entry's deviation on the held-back completion claims).
+**Verified while here, as the item's own text required:** no earlier prompt persists
+join *intent* anywhere this answer would have to migrate. The only join-shaped rows
+on disk are `message` rows of kind `join` (observed history, written by the ingest
+classifier) and `buffer` rows (a buffer exists because traffic was seen for it);
+autojoin lives only in `connection::Config.autojoin`, in memory, passed per actor
+spawn. Both are consistent with the answer: history is a record of what happened,
+not a declaration of what should happen at next startup.
+
+## Prompt 9b — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 9b entry above; PR #15, second commit
+
+Appended rather than edited into that entry, deliberately, for the reason prompt 9a's
+addendum recorded: the entry is committed and pushed, so revising it in place trips
+`log-append-only` on the staged diff.
+
+**Shipped:** seven fixes from the review.
+
+(1) **The highest finding, and it was a real one: the 65-buffer attach test did not
+pin the deadlock — it passed against prompt 9a's engine.** The shape drained all 65
+announcements *before* asking for a window, so the old spawned replay task made
+progress and `try_direct` never saw a full lane. The reviewer's proposed shape (ask
+immediately, nothing drained, sleep, then drain and assert the correlated Response
+arrived at all) was applied — **and still passed on main**, because with nothing
+ordering the two answers the outcome is a coin flip between the replay task filling
+the lane and the window's answer arriving first. That coin flip *is* the
+nondeterminism this prompt's lane decision describes, so a test that depends on it
+proves nothing. The shape that is deterministic adds one wait between attach and the
+fetch, so the replay has demonstrably landed (pre-9b: filled the 64-slot lane and
+parked its task on the 65th) before the window is asked for. **Verified both ways, 5
+runs each: 5/5 FAILED against `origin/main`** with the exact loud line
+`client 1 is not draining its directed lane; dropping it and this read`, **5/5 pass
+on HEAD.** The test's doc comment now records both wrong shapes and why each was
+wrong, because the next person to "simplify" it will reach for one of them.
+
+(2) **A secrets leak in a line this prompt added.** The dropped-while-disconnected
+`eprintln` printed `{command:?}`, and `ActorCommand::Privmsg` carries the text — so a
+NickServ `IDENTIFY` issued during backoff would have put a password on stderr,
+against CLAUDE.md's rule, which governs logs exactly as much as config. Fixed with a
+`describe(&ActorCommand)` helper printing variant and target only (`Privmsg to
+#chan`, `Join #chan`); the line stays **ungated and loud**, only the body goes, and
+`ActorCommand`'s doc now says so. Worth naming the shape of the mistake: the leak
+arrived *with* the fix for silence — making a drop loud and making it safe are two
+jobs, and `{:?}` on a domain type is where the second one gets skipped.
+
+(3) `quit abc` silently meant `quit 10`. Now an error line naming the argument, and
+the session stays alive — a swallowed typo would quietly restore the exact race the
+drain exists to close.
+
+(4) Two over-broad doc claims tightened. bus.rs said no `blocking_send` can be parked
+behind "a wedged reader"; the true claim is *behind a client* — the core loop can
+still park on the storage thread, because `connect` awaits a
+`spawn_blocking(ensure_network)` round trip and the bounded reply lanes are drained
+only by that same loop. The doc now scopes itself and points at the stage-4 note.
+`announce`'s idempotence contract ("a duplicate is legal, a missing one is not") now
+says what it is conditional on: it holds while the lane is live; under `Full` the
+client is dead by policy and the replay is abandoned with it.
+
+(5) live-run.sh's `around-hit` line gained the comment its correctness depends on:
+`last_hits` is filled by the SearchResults *event* while `wait search` now returns on
+the *response*, which is safe **only** because both ride the same directed lane in
+order. Filed as a stage-2 carry-forward too, so the invariant is not documented in
+only one place.
+
+(6) **Finding (b), the untested failure path: fixed rather than deferred.** `crates/
+supernaut` had zero tests, and `finish()` returning `Ok` on timeout would have let
+the whole 40-assertion acceptance suite pass while `quit` silently discarded in-flight
+requests — invisible from outside, because the assertions count printed responses, not
+the exit code. It unit-tests cleanly with a fabricated `SessionState` (a dangling
+`RequestId`, an `incoming` channel held open so the lane is pending rather than
+closed) and deadline 0, which keeps it instant without a paused-clock runtime and
+takes the identical code path a real 10s timeout takes. No restructuring was needed,
+so the rejected-because is moot. First test in the binary crate.
+
+(7) STAGE-1-PROMPTS.md's 9b section gained the `**Status:** complete.` outcome
+paragraph every other completed prompt has.
+
+**Accepted as they stand, with the reasoning recorded rather than re-litigated:**
+the oversize disposition (1469 vs 800 — the review confirmed neither descope-ladder
+item would have closed the gap; they total 143 lines, so the justification in the
+entry above stands); `storage/rows.rs` taken unconditionally although exec.rs would
+have landed at ~383 rather than over 400 (the split's *shape* was the one the detail
+ordered, and its cost was paid against a budget already blown — reversing it now
+would churn a file for a line count that is no longer the binding constraint);
+`storage/records.rs` as a second unforeseen ratchet-forced split (a pure move along a
+real seam); and `wait search`'s reorder consequence, which the review verified safe
+via the same-lane invariant now written into the script.
+
+**Rejected, with the reason:** the proposed note that `Awaited::from`'s exhaustive
+match makes a future wire change a two-file edit. No remaining stage-1 prompt may add
+a wire variant — each one's fence forbids it and `PROTOCOL_VERSION` is frozen until
+stage 4's handshake — so the note changes nothing about how 10a or 10b execute, and
+the exhaustive match is already its own compile-time enforcement. A note whose only
+effect is to be read and agreed with is noise in a file the next session must read
+front to back.
+
+**Learned:** the useful lesson is (1), and it generalizes past this test. **A
+regression test written from the fix rather than against the bug will pass on the
+buggy code**, and nothing in a green suite says which kind it is. The only way to
+know was to check out the parent commit, copy the test onto it, and run it — cheap
+(one `git worktree add --detach origin/main`), and it turned a test that proved
+nothing into the one that pins the lane policy. It also caught the second-order
+version of the same error: a shape that fails on main *sometimes* is not a
+regression test either, and "sometimes" is exactly what a concurrency fix's test
+looks like when it is still racing. Corollary worth keeping: when the bug being fixed
+*is* a nondeterminism, the test has to remove the nondeterminism to observe it —
+hence the wait, which is not a sleep-instead-of-a-sync but the ordering the assertion
+is about.
+
+**Live run:** `scripts/live-run.sh` re-run after these fixes, because actor.rs and
+session.rs are both on live paths: **40/40, exit 0** — the third green run of this
+prompt. `quit` with no argument still drains (b.out 3 `ok` lines, c.out 502), and the
+marker round-trip is unchanged (`event read-marker buffer=2 seq=3` in a.out,
+`last_read=3` in d.out and in `sqlite3`).
+
+**Review:** the review's findings are all dispositioned above — two code fixes
+(the non-load-bearing test, the secrets leak), five smaller fixes, four liberties
+accepted with reasons, one note rejected with a reason. Its highest finding was
+correct and its proposed remedy was insufficient, which is recorded above rather
+than smoothed over.
+
+**Carry-forward raised:** eight notes landed, one rejected. Two to prompt 10a (`quit`
+now blocking and exiting non-zero, which a config-seeded autoconnect can trip; `wait
+message` no longer counting the Join rows autojoin produces, so 10a must use `wait
+rows`). Four to PLAN stage 4 item 1 (the replay is now the burst most likely to trip
+the lane cap, so a per-session writer must serve it first; `Full` and `Closed` are
+indistinguishable at the client, so the frame protocol owes the distinction; the core
+loop can still park on the storage thread and `reads_tx` now has three producers; and
+the existing byte-accounting note). One to PLAN stage 2 item 1 (`around-hit`'s
+same-lane dependency). One rejected (the `Awaited::from` note, above). The
+config-vs-runtime-state answer is its own decision entry above, not a note.

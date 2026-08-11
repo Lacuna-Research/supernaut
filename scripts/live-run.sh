@@ -296,7 +296,11 @@ for _ in $(seq 1 100); do
 	sleep 0.2
 done
 # Jump-to-context, headless: the anchor is the newest #flood search hit above
-# ("flood line 250"), not a seq this script pasted in.
+# ("flood line 250"), not a seq this script pasted in. Note the coupling this
+# depends on: `last_hits` is filled by the SearchResults *event*, while `wait
+# search` now returns on the *response*. It is safe only because search's Response
+# and its correlated Event ride the same directed lane, in that order — if
+# SearchResults ever moves lanes, this line races its own data.
 printf 'backlog #flood around-hit 7\nwait backlog 3 10\n' >&3 || true
 for _ in $(seq 1 50); do
 	[ "$(grep -c 'waited backlog' "$WORK/a.out")" -ge 3 ] && break

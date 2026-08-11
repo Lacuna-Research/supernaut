@@ -99,9 +99,15 @@ impl Bus {
     /// Why synchronous rather than awaiting: with no await point here, **no path
     /// in the core loop can be stalled by a client**, so the storage thread's
     /// `blocking_send` on `search_tx`/`reads_tx` can never end up parked behind
-    /// a wedged reader. It is also what makes an ordered pair (a Response and
-    /// its correlated Event) indivisible: two calls with no await between them
-    /// either both land or the lane is already gone and the session is over.
+    /// a *client*. It is also what makes an ordered pair (a Response and its
+    /// correlated Event) indivisible: two calls with no await between them either
+    /// both land or the lane is already gone and the session is over.
+    ///
+    /// Precisely scoped, because the stronger claim would be false: the core loop
+    /// can still park on the **storage thread** — `connect` awaits a
+    /// `spawn_blocking(ensure_network)` round trip — and those bounded reply lanes
+    /// are drained only by that same loop. What this primitive removes is the
+    /// *client* from that chain; the rest is a stage-4 note.
     ///
     /// A consequence worth knowing: removal only drops the `Sender`, so a killed
     /// session still drains what is already queued and *then* sees `Closed` — it

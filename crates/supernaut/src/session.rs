@@ -201,12 +201,20 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
         None => Ok(true),
         Some("quit") => {
             // `quit [secs]`: wait for what the engine still owes before the
-            // runtime drops underneath it.
-            finish(
-                state,
-                parts.next().and_then(|s| s.parse().ok()).unwrap_or(10),
-            )
-            .await?;
+            // runtime drops underneath it. A malformed deadline is an error
+            // rather than a silent 10 — a swallowed typo here would quietly
+            // restore the race this drain exists to close.
+            let secs = match parts.next() {
+                None => 10,
+                Some(arg) => match arg.parse() {
+                    Ok(secs) => secs,
+                    Err(_) => {
+                        println!("error - quit takes a deadline in seconds, got {arg}");
+                        return Ok(true);
+                    }
+                },
+            };
+            finish(state, secs).await?;
             Ok(false)
         }
         Some("connect") => {

@@ -213,3 +213,47 @@ pub(crate) fn handle_incoming(
         Err(TransportError::Closed) => Err("transport closed".to_owned()),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use havoc_ipc::{Request, RequestId};
+    use havoc_transport::InProcess;
+    use std::collections::HashMap;
+    use tokio::sync::mpsc;
+
+    /// The drain's **failure** path, which nothing else exercises: a `finish()` that
+    /// returned `Ok` on timeout would let the entire live-run acceptance suite pass
+    /// while `quit` silently discarded in-flight requests — exactly the prompt-7
+    /// regression this machinery exists to close, and invisible from the outside
+    /// because the assertions count printed responses, not the exit code.
+    ///
+    /// Deadline 0 is the degenerate case on purpose: it keeps the test instant
+    /// without a paused-clock runtime, and it is the same code path a real 10s
+    /// timeout takes.
+    #[tokio::test]
+    async fn finish_reports_unanswered_requests_rather_than_returning_ok() {
+        let (requests, _req_rx) = mpsc::channel::<Request>(4);
+        // Held, not dropped: a closed lane would surface as `transport closed`
+        // instead of the timeout this test is about.
+        let (_in_tx, incoming) = mpsc::channel(4);
+        let mut state = SessionState {
+            transport: InProcess { requests, incoming },
+            next_request: 2,
+            buffers: HashMap::new(),
+            msg_counts: HashMap::new(),
+            last_hits: HashMap::new(),
+            outstanding: HashMap::from([(RequestId(1), Awaited::Marker)]),
+            answered: Answered::default(),
+            phase: None,
+        };
+
+        let error = finish(&mut state, 0)
+            .await
+            .expect_err("an unanswered request must not look like a clean quit");
+        assert!(
+            error.contains('1') && error.contains("unanswered"),
+            "the error must name what is still owed: {error}"
+        );
+    }
+}

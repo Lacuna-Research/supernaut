@@ -1537,6 +1537,16 @@ references a password in any version, not an unsplit prompt.
   `state.settings`; two configured networks sharing a `name` mean every buffer
   of one is announced under the other's NetworkId, with no error. Make `name`
   uniqueness a validated config invariant, not an assumption inside `announce`.
+- From prompt 9b: **`quit` now blocks on unanswered requests and exits non-zero
+  on timeout.** `finish()` in `crates/supernaut/src/session_wait.rs` drains
+  `outstanding` before `quit` returns, and `main.rs` maps its `Err` to
+  `ExitCode::FAILURE`. A config-seeded autoconnect issues requests the script never
+  named, so a live-run segment that quits early can now fail where it used to
+  succeed silently — reach a quiescent point before quitting, or pass `quit <secs>`.
+- From prompt 9b: **`wait message` no longer counts Join rows; `wait rows` does.**
+  `MsgCounts` in `crates/supernaut/src/session_wait.rs`. Autojoin from config
+  produces Join rows, so a 10a segment syncing on "the autojoin landed" must use
+  `wait rows <chan> 1`; `wait message` will hang until a human speaks.
 - From prompt 9a: **live-run.sh's session D hard-codes `--host localhost` solely
   because the network name is `debug-<host>`.** That same-host coupling is what
   makes A's rows resolvable to D; when config becomes the authority for network

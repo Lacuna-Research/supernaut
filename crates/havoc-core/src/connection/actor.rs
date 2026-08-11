@@ -23,10 +23,24 @@ use super::{Config, Machine, State, ingest};
 /// requested caps, so our own PRIVMSG comes back as a `MessageAdded` from the
 /// authority that matters — and on a server without it, "sent" is unconfirmable
 /// by anyone, which is what at-most-once means.
+///
+/// The drop is loud, but the loud line never carries a message **body**: a PRIVMSG
+/// can be a NickServ `IDENTIFY`, and stderr is not where credentials go. Variant
+/// and target only.
 #[derive(Debug)]
 pub enum ActorCommand {
     Join(String),
     Privmsg { target: String, text: String },
+}
+
+/// A command named for a log line: variant and target, **never** the body. The
+/// only caller is the loud drop while disconnected, and a PRIVMSG's text can be a
+/// password (CLAUDE.md's secrets rule applies to logs as much as to config).
+fn describe(command: &ActorCommand) -> String {
+    match command {
+        ActorCommand::Join(channel) => format!("Join {channel}"),
+        ActorCommand::Privmsg { target, .. } => format!("Privmsg to {target}"),
+    }
 }
 
 /// What the actor reports back to the core task.
@@ -157,10 +171,13 @@ async fn run(params: ActorSpawn, mut commands: mpsc::Receiver<ActorCommand>) {
                             None => return,
                             // At-most-once, made loud: nothing can be reported
                             // back (the Ack is already sent), so the one honest
-                            // thing left is to say it happened.
+                            // thing left is to say it happened. Never the body —
+                            // a PRIVMSG can carry a NickServ password, and this
+                            // goes to stderr.
                             Some(command) => eprintln!(
-                                "network {}: dropped while disconnected: {command:?}",
-                                network.0
+                                "network {}: dropped while disconnected: {}",
+                                network.0,
+                                describe(&command)
                             ),
                         },
                     }

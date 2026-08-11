@@ -80,11 +80,6 @@ documentation example must not block a real prompt.) `make check` refuses to let
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
-- **Config vs. runtime state.** *(blocking: prompt 10a)* Where does "I joined this
-  channel manually" live — config file or database? (NORTH-STAR §9: leaning database,
-  config as seed only.) Prompt 10a ships the config file, so it settles here. Until
-  then, earlier prompts must not persist join state anywhere the answer would have to
-  migrate; if one does, name the symbol on this item.
 - **Read marker reconciliation across attached clients.** *(not blocking)* Last-write-
   wins on timestamp is probably fine; also decide whether to propagate upstream via
   IRCv3 `draft/read-marker` (NORTH-STAR §9). Prompt 9b ships the one marker the single
@@ -214,6 +209,12 @@ Covers NORTH-STAR §8 M3.
      lanes via select! with no ordering between an Ack and the event it caused.
      The TUI's projection must dedupe phase transitions and never assume
      response-before-event.
+   - From stage 1 prompt 9b: **`around-hit`, and anything shaped like it, depends
+     on search's Response and its correlated Event riding the same directed lane in
+     order.** `wait search` counts *responses* while `last_hits` is filled by the
+     *event*; the invariant holds only because both travel one lane. If
+     `SearchResults` ever moves lanes, every response-counted wait races its own
+     data — live-run.sh carries the same warning above its `around-hit` line.
    - From stage 1 prompt 9b: **a `SetReadMarker` `Ack` and its
      `ReadMarkerChanged` are unordered relative to each other** — the Ack rides
      the directed lane, the event the broadcast lane, and the live run has been
@@ -316,6 +317,25 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
      will not. The frame protocol needs either a dropped-message signal or a
      documented at-most-once rule for responses — decided alongside the
      Lagged/Closed frame representation the note above already owes.
+   - From stage 1 prompt 9b: **the attach replay is now inline and unbuffered — a
+     client with >4096 buffers is killed at attach rather than served slowly.**
+     `announce` in `crates/havoc-core/src/core/reads.rs` loops `bus.direct` with no
+     backpressure path, and the replay is the one burst whose size the *engine*
+     chooses — so it is now the burst most likely to trip
+     `DIRECTED_LANE_CAPACITY`. A per-session writer task must handle the replay
+     first, before ordinary traffic.
+   - From stage 1 prompt 9b: **`Full` and `Closed` are indistinguishable at the
+     client — both look like a closed transport.** The dropped-for-not-reading
+     reason lives only in engine stderr naming the `ClientId`. The frame protocol
+     needs the distinction if a client is ever to log "you were dropped" rather
+     than "the server went away" (extends the dropped-message note above).
+   - From stage 1 prompt 9b: **the core loop can still park on the storage thread,
+     and `reads_tx` now has three producers.** `connect()` in
+     `crates/havoc-core/src/core.rs` awaits a `spawn_blocking(ensure_network)`
+     round trip to the thread whose bounded (64) reply lanes only the core loop
+     drains, and `SetReadMarker`/`Backlog`/`ListBuffers` all answer on `reads_tx`.
+     Untrusted pipelining clients make a deep `reads_tx` reachable; decide with the
+     socket server whether `connect` stops being a blocking round trip.
    - From stage 1 prompt 9b: **`DIRECTED_LANE_CAPACITY` counts messages, not
      bytes, and one message can be a 200-row window.** 4096 was chosen to sit far
      above any legitimate attach replay and far below hurting a laptop; byte-based
