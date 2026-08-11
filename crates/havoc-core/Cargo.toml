@@ -14,8 +14,12 @@ irc-proto = "1.1.0"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 rustls = { version = "0.23.43", default-features = false, features = ["ring", "std", "tls12"] }
 rustls-pki-types = { version = "1.15.1", features = ["std"] }
+serde = { version = "1", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["sync", "net", "time", "rt", "io-util", "macros"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring", "tls12"] }
+# No `display`: the TOML *serializer* is not compiled in, so "the program never
+# writes the config file" is a capability this crate lacks, not a rule it obeys.
+toml = { version = "1.1.4", default-features = false, features = ["std", "parse", "serde"] }
 webpki-roots = "1.0.9"
 
 [dev-dependencies]

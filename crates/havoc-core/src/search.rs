@@ -9,6 +9,17 @@
 pub struct SearchSpec {
     pub match_query: String,
     pub nick: Option<String>,
+    /// `in:` — a buffer **name**, and therefore deliberately **unscoped across
+    /// networks**: two networks with a `#rust` each are one `in:#rust` result
+    /// set. Left that way at prompt 10a rather than fixed there: the accretion
+    /// *cause* died with the `debug-<host>` naming (stable config names mean one
+    /// network row per network, not one per host string), so the union is now
+    /// real but rare, and scoping is a grammar question (`in:net/#chan` versus a
+    /// `network:` filter) owned by stage 2's `/search` — the only consumer that
+    /// can render which network a hit came from. Pinned by
+    /// `in_filter_unions_one_buffer_name_across_networks` in
+    /// storage/tests.rs, so stage 2 changes a documented behaviour with a
+    /// failing test rather than discovering an assumption.
     pub buffer: Option<String>,
     /// `server_time >=`, unix millis — a filter on display time, never an
     /// ordering (§6.1).

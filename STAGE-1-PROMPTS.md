@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 10/12 complete. Next: prompt 10a.
+**Status:** 11/12 complete. Next: prompt 10b.
 
 <!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
@@ -1523,46 +1523,318 @@ prompt's fence warned that config-without-credentials ships the
 plaintext-password trap, and the answer is a config format that never holds or
 references a password in any version, not an unsplit prompt.
 
-*To be written out before it starts.*
+```
+The user's file becomes the authority on network identity: after this prompt a person
+writes one TOML file by hand, runs `supernaut session` with no connection flag of any
+kind, and watches it register and land in a channel it was never told to join — while
+a malformed file is refused, by key and by network, before anything dials.
 
-### Carry-forward
+Four places the stub, the notes, and the north star pull apart, surfaced rather
+than resolved silently:
 
-- From prompt 8: **`in:` resolves buffer names across every network row.**
-  `run_search` in `crates/havoc-core/src/storage/exec.rs` filters by name with
-  no network scope, and reused data dirs accrete one `debug-<host>` network row
-  per host string — one channel name silently unions histories across
-  networks. Decide scoping here, where config becomes the authority for
-  network identity.
-- From prompt 5: **the debug session hardcodes network identity that config must
-  replace.** `const NETWORK: NetworkId = NetworkId(1)` in
-  `crates/supernaut/src/session.rs`, and the storage network name is
-  `debug-<host>` — `ensure_network` keys on name, so a reused data dir accretes
-  one row per host string. Config becomes the authority for caller ids and
-  stable names; decide whether `debug-*` rows are migrated or abandoned.
-- From prompt 6 (config half): **`--tls-ca` and `NetworkSettings.security`
-  are installed base.** The TOML schema must own per-network `tls_ca`, and the
-  loopback-only plaintext rule needs a new home once config supplies the host.
-- From prompt 9a: **the announcement resolves buffers by network name and
-  silently collapses duplicates.** `announce` in
-  `crates/havoc-core/src/core/reads.rs` builds `HashMap<&str, NetworkId>` from
-  `state.settings`; two configured networks sharing a `name` mean every buffer
-  of one is announced under the other's NetworkId, with no error. Make `name`
-  uniqueness a validated config invariant, not an assumption inside `announce`.
-- From prompt 9b: **`quit` now blocks on unanswered requests and exits non-zero
-  on timeout.** `finish()` in `crates/supernaut/src/session_wait.rs` drains
-  `outstanding` before `quit` returns, and `main.rs` maps its `Err` to
-  `ExitCode::FAILURE`. A config-seeded autoconnect issues requests the script never
-  named, so a live-run segment that quits early can now fail where it used to
-  succeed silently — reach a quiescent point before quitting, or pass `quit <secs>`.
-- From prompt 9b: **`wait message` no longer counts Join rows; `wait rows` does.**
-  `MsgCounts` in `crates/supernaut/src/session_wait.rs`. Autojoin from config
-  produces Join rows, so a 10a segment syncing on "the autojoin landed" must use
-  `wait rows <chan> 1`; `wait message` will hang until a human speaks.
-- From prompt 9a: **live-run.sh's session D hard-codes `--host localhost` solely
-  because the network name is `debug-<host>`.** That same-host coupling is what
-  makes A's rows resolvable to D; when config becomes the authority for network
-  names, switch that segment to the config file in the same commit, or the
-  announcement proof passes (or fails) for the wrong reason.
+- The stub says "caller-assigned ids"; §2.1 says a product that needs config-file
+  editing to work has failed, and hand-numbering networks is exactly that ceremony.
+  Resolved: ids **are** caller-assigned in the sense core.rs means — assigned
+  outside havoc-core, distinct from the storage row id — but assigned by the
+  *loader*, not typed by a human: networks sorted by name, `NetworkId(1..N)`, no
+  `id` key in the schema. The precondition was checked, not assumed: no wire
+  `NetworkId` is ever persisted (`ensure_network` in
+  crates/havoc-core/src/storage/rows.rs keys the `network` table on name, and
+  `buffer.network_id` references the storage row), so renumbering across runs is
+  unobservable. If a wire NetworkId ever gets persisted or cached across
+  restarts, the id becomes a config field, with the uniqueness rule and the
+  migration story that implies.
+- §3.1 "works well before configuration" against a prompt that makes config
+  mandatory. Resolved: mandatory for the `session` subcommand only. The
+  no-subcommand path (`supernaut --data-dir <p>`) still opens the store and
+  reports with no config file anywhere, which is the works-before-configuration
+  property stage 1 can honestly claim; the product's answer is stage 2 item 7's
+  first-run, and it can be neither a flags fallback nor a silent config write (the
+  governing decision forbids the second). Keeping the flags path alongside config
+  is the real trap: live-run.sh would keep exercising the flags, and config —
+  the surface every later stage builds on — would be the decorative one.
+- Note 6 asks for the loopback-only plaintext rule to be rehomed, but §2.3 only
+  demands a loud opt-in, so that rule has always been stricter than the north
+  star. Resolved: keep it, in config validation, because it is the debug-grade
+  rule stage 1 shipped and relaxing it is a product call belonging to the
+  stage-2 first-run, where a user with a plaintext LAN bouncer actually appears.
+  And `--allow-plaintext` is **deleted**, not kept beside the config key:
+  security is per-network, so a process-global flag cannot say which network it
+  blesses — the opt-in belongs where the host is.
+- Note 9b's quit hazard presupposes a config-seeded autoconnect. This prompt
+  deliberately builds none: `connect` stays an explicit verb, because session D's
+  entire proof is a process that dials nothing while holding a config that names
+  the network it would dial. The note is discharged by absence, and its warning
+  travels to PLAN stage 2's embedded wiring, which is where autoconnect lands and
+  where a startup-issued request nobody typed becomes real.
+
+The work:
+
+- The schema, one file, `$XDG_CONFIG_HOME/supernaut/config.toml` (or
+  `$SUPERNAUT_CONFIG_DIR/config.toml`, or `$HOME/.config/supernaut/config.toml`):
+
+      # Seed data. Supernaut never writes this file.
+      nick = "alice"
+
+      [networks.libera]
+      host = "irc.libera.chat"
+      autojoin = ["#supernaut"]
+
+      [networks.ergo-local]
+      host = "localhost"
+      port = 6667
+      plaintext = true
+
+  The **table key is the stable network name** — the same string
+  `ensure_network` keys the `network` table on, which is what makes config
+  identity and storage identity one thing rather than two that must agree.
+  Per-network keys: `host` (required), `port` (optional, defaulting to 6697 with
+  TLS and 6667 with plaintext — opinionated defaults are the product, §2.1),
+  `tls_ca` (optional PEM path, resolved relative to the config file's own
+  directory so a generated fixture directory is portable), `autojoin` (optional,
+  default empty), `plaintext` (optional bool, default false). `nick` is
+  top-level and global; `username` and `realname` stay derived from it in the
+  lowering, as session.rs derives them today. No per-network nick override, no
+  `server_name` key for an SNI/connect-host split: both are one field each when a
+  second network or a bouncer makes them real (PLAN stage 6), and neither is
+  observable in a one-network stage.
+- The map form is chosen over `[[network]]` + `name` **for the 9a note**: two
+  `[networks.libera]` tables are a TOML-level error, so name uniqueness is
+  enforced by the file format and is unrepresentable in the parsed type
+  (`BTreeMap<String, NetworkEntry>`) rather than being a validation pass we could
+  forget to write. `announce` in crates/havoc-core/src/core/reads.rs keeps
+  building its `HashMap<&str, NetworkId>` unchanged, and gains one doc sentence
+  saying the silent-collapse hazard is now a config-load error — there is nothing
+  to assert, because there is nothing to represent. Names are case-sensitive, to
+  match the `network.name TEXT UNIQUE` column's default collation; `Libera` and
+  `libera` are two networks and two rows, deliberately and consistently.
+- Where it lives, and the seam: `crates/havoc-core/src/config.rs` (new, added to
+  lib.rs's module list) owns the schema, validation, and the lowering
+  `Config::into_networks(self) -> HashMap<NetworkId, NetworkSettings>` —
+  havoc-core owns config per PLAN's module table and §4.5. It does **no file
+  I/O**: `config::parse(text: &str, base_dir: &Path) -> Result<Config, String>`,
+  so every rule is testable without touching disk, and `String` errors rather
+  than an enum because nothing branches on the variant — the binary prints it and
+  exits, exactly as `search::parse` already does. Path resolution and the file
+  read stay in the binary beside `default_data_dir` in
+  crates/supernaut/src/main.rs (`default_config_path`: `SUPERNAUT_CONFIG_DIR`,
+  then `XDG_CONFIG_HOME`, then `$HOME/.config`, else an error naming the env
+  var) — locating files is the binary's job, parsing them is core's. Note the
+  name collision with the shipped `connection::Config`: core.rs already aliases
+  that as `ConnectionConfig`; alias at an import site if it bites, do not rename a
+  shipped type.
+- Validation, all of it before anything dials, every message naming the network
+  and the key: `nick` non-empty and whitespace-free (whitespace breaks the NICK
+  line itself, which is our bug, not the server's policy); `host` non-empty;
+  network name non-empty; `plaintext = true` with a non-loopback host is an error
+  naming the host (the same `localhost`/`127.0.0.1`/`::1` string check
+  session.rs's `is_loopback` does today, moved here and deleted there — it is a
+  string check, not name resolution, and that is unchanged); `plaintext` together
+  with `tls_ca` is an error, because it asks for a trust anchor on a connection
+  with no trust. Deliberately **not** validated: channel names in `autojoin`
+  (CHANTYPES comes from ISUPPORT, so we would be guessing, and the server's
+  refusal is already loud) and `tls_ca`'s existence as a file (the TLS connector
+  reports that, once, where the failure actually is).
+- `#[serde(deny_unknown_fields)]` on both structs, plus a **named refusal for
+  credential-shaped keys** (`password`, `pass`, `sasl_password`,
+  `nickserv_password`): the generic unknown-key error already rejects them, but a
+  message that says credentials never live in the config file (§5.8) and points at
+  the keyring 10b brings is what makes the prompt's hard constraint executable
+  rather than aspirational. This is also why `deny_unknown_fields` is not
+  optional: a silently-ignored typo'd key is the config bug class that costs an
+  evening, and it is what will make 10b's `sasl_account` addition detectable
+  instead of ambiguous.
+- The dependency: `toml` in havoc-core, `default-features = false, features =
+  ["std", "parse", "serde"]`, plus `serde` with `derive` (havoc-core has no serde
+  edge today; havoc-ipc's is separate). **Both are already on `DEP_ALLOWLIST`**,
+  seeded from NORTH-STAR §5 — so no allowlist edit and therefore no
+  scripts/test-checks.sh fixtures are owed; the BUILD-LOG decision entry still
+  is. Argue the choice there: hand-rolling TOML is rejected outright (quoting,
+  escapes, dotted keys, datetimes — a parser is a commodity and ours would be the
+  buggy one), and dropping the `display` feature means the *serializer is not
+  compiled in*, so "the program never writes the config file" is a capability the
+  binary does not have rather than a rule it obeys. Name the transitive set
+  (`toml_parser`, `winnow`, `toml_datetime`, `serde_spanned`, `serde_core`) —
+  the allowlist check reads declared deps only, so hygiene here is an argument,
+  not a check.
+- CLI surface, crates/supernaut/src/session.rs: `--host`, `--port`, `--nick`,
+  `--join`, `--tls-ca`, and `--allow-plaintext` are **deleted** (replace, don't
+  deprecate). New: `--network <name>`, optional when the file names exactly one
+  network and an error naming the candidates when it does not. `--sasl <account>`
+  and `SUPERNAUT_SASL_PASSWORD` stay untouched — 10b deletes both with the
+  keyring, and deleting the bridge here would leave no way to authenticate.
+  `--data-dir` and `--trace-irc` stay: a data-dir key in config would make "where
+  is my history" answerable only by reading two files, and a trace flag is
+  diagnostics, not seed data. `const NETWORK: NetworkId = NetworkId(1)` dies;
+  `SessionState` carries the resolved `network: NetworkId`. Core is spawned with
+  **every** configured network, not just the selected one — that is the
+  `HashMap<NetworkId, _>` §6.9 asks for, it costs nothing while nothing connects,
+  and it is what lets `announce` resolve buffers belonging to a configured network
+  this process never dialled (`send` then answers "buffer's network is not
+  connected", which is already the right sentence). The SASL config is injected
+  into the selected network's `NetworkSettings.connection.sasl` after lowering,
+  in one place, marked as the site 10b replaces — config lowers with `sasl: None`
+  always, because config has no credential surface to lower from.
+- One loud line at session start, as prompt 6 shipped: the plaintext warning
+  now names the network as well as the host, and the extra-trust-anchor line names
+  the network and the resolved PEM path.
+- `debug-*` rows: **abandoned, not migrated** — and the abandonment is made
+  visible and is reversible. No migration, because a `debug-<host>` row would
+  have to be *guessed* onto a config network by host string, and guessing wrong
+  merges two networks' histories irreversibly, which is the one unrecoverable
+  outcome available here; and because no user has irreplaceable history in a
+  temp-dir debug row. Visible: `announce`'s silent `continue` over an
+  unconfigured network name becomes one greppable line per skipped network
+  (`orphan network <name>: N buffers not announced (not in config)`), collected
+  during the loop and printed after it. Reversible: because storage keys networks
+  on the same stable name config now supplies, a person gets those buffers back
+  by adding `[networks."debug-localhost"]` to the file — which is precisely why
+  no migration is owed. Honest about the remaining hole: orphan history is still
+  reachable through `Search`, which has no network filter, so a hit can carry a
+  BufferId the client cannot name — the same advisory-not-a-boundary gap PLAN
+  stage 4 already owns for `FetchBacklog`; it is recorded there, not fixed here.
+- `in:` **stays unscoped**, and stops being an accident: the accretion *cause*
+  dies with `debug-<host>` (stable names mean one row per network, not one per
+  host string), while the cross-network union of one channel name remains real and
+  now rare. Scoping is deferred to stage 2's `/search`, which owns the grammar
+  question (`in:net/#chan` versus a `network:` filter) and is the only consumer
+  that can render which network a hit came from — the debug CLI prints
+  `buffer=<id>`, so a scope filter would be unobservable here. What lands instead
+  is the honest form of a deferral: the union is stated in the doc comments on
+  `SearchSpec.buffer` (crates/havoc-core/src/search.rs) and `run_search`
+  (crates/havoc-core/src/storage/query.rs), and **pinned by a test** beside
+  `search_hits` in crates/havoc-core/src/storage/tests.rs — two network rows, one
+  buffer name, `in:#x` returns both — so stage 2 changes a documented behaviour
+  with a failing test rather than discovering an assumption.
+- Tests, in a new crates/havoc-core/tests/config.rs (integration, because every
+  rule is on the public surface, and it keeps config.rs well under the 400-line
+  ratchet): a full file parses and lowers; ids are 1..N in name order, pinned; a
+  duplicate `[networks.x]` table is a parse error (the 9a note's invariant, and
+  the test is what makes "the format gives it to us" a claim rather than a hope);
+  an unknown key errors; `password = "..."` errors *by name*; `plaintext` with a
+  non-loopback host errors and with `tls_ca` errors; a missing or whitespace
+  `nick` errors; the two default ports; `tls_ca` resolved relative to
+  `base_dir`. No storage schema change and no migration: nothing about network
+  identity on disk moves.
+- scripts/live-run.sh, in this order. First a `write_config <dir> <nick>
+  [autojoin]` helper emitting `$dir/config.toml` with `[networks.liverun]`,
+  `host = "localhost"`, the run's `$TLS_PORT`, and `tls_ca = "$WORK/fullchain.pem"`
+  (watch `set -e`: a trailing `[ -n "${3:-}" ] &&` test must not be the function's
+  last command). Every session then runs with `SUPERNAUT_CONFIG_DIR=$WORK/config-<x>`
+  and **no `--host`, `--port`, `--nick`, `--join`, `--tls-ca` or
+  `--allow-plaintext` anywhere in the file**; A and D pass `--network liverun`
+  explicitly because that name coupling is the proof, B and C omit it to exercise
+  the single-network default. A's `#supernaut` join becomes config autojoin, which
+  deletes both its `join #supernaut` verb and the explicit re-join after the ergo
+  restart (prompt 6's autojoin re-fires on the fresh machine) — and the row
+  arithmetic the marker assertions depend on is *preserved exactly*: A's join is
+  still row 1 and A's post-restart re-join still row 4, so `wait rows #supernaut
+  4 10` is untouched. Per note 9b, the autojoin sync is `wait rows #supernaut 1`,
+  never `wait message`, which would hang until a human speaks. `join #flood`
+  stays an explicit verb, so both paths are exercised and the flood segment is
+  unchanged. Session D's `--host localhost` coupling is deleted in this same
+  commit (note 9a): D resolves #supernaut because its config names the network A's
+  config named, and the comment says so instead of explaining a host-string
+  accident. New session E, after D, over A's data dir with a config naming
+  `[networks.elsewhere]`: its `wait buffer #supernaut 3` times out (invocation
+  tolerated with `|| true`), and the assertions are that e.out carries `orphan
+  network liverun` and no `buffer-created .* name=#supernaut` — abandonment,
+  observed. `quit` deadlines stay as they are: with no autoconnect and with
+  autojoin issuing no `Request`, `outstanding` contains exactly what each script
+  segment named, so note 9b's early-quit failure mode is not reachable — and the
+  comment above B's `quit` says that, so a later autoconnect does not silently
+  re-open it.
+- Docs, in the same PR. Four BUILD-LOG decision entries, one per rejected
+  alternative argued above: the schema shape and derived ids (over `[[network]]`
+  with an explicit `id`, over name-hashed ids); the `toml`/`serde` dependency
+  (over hand-rolling, over default features — the missing serializer is the
+  point); the debug CLI's connection surface moving wholly into config (config
+  mandatory for `session`, the six flags deleted, plaintext as a per-network key —
+  over flags-as-fallback, over auto-writing a default file, over keeping
+  `--allow-plaintext` beside the key); and network identity after config (orphaned
+  rows abandoned-but-reversible, `in:` left unscoped and pinned — over a
+  host-string migration, over grammar invented here). PLAN.md gains the deferrals
+  in the same turn: stage 2's search UI (`in:` network scoping, naming the pinned
+  test), stage 2 item 7 (first-run may not inherit "config is mandatory" and may
+  not write the file — the governing decision), stage 2's embedded wiring
+  (autoconnect at startup, carrying note 9b's warning forward), stage 6
+  multi-network (per-network nick, SNI `server_name`, and an explicit config `id`
+  if a NetworkId is ever persisted). Prompt 10b's carry-forward gains two notes:
+  the SASL injection site in session.rs that its keyring replaces, and that
+  `sasl_account` must move out of the credential-shaped-key refusal list and into
+  the schema in one commit. All seven of this prompt's notes are deleted and
+  recorded under `**Carry-forward consumed:**` as one act. Status lines: the
+  queue's `11/12 complete. Next: prompt 10b.` and README's 10a row, together.
+- Budget: this is comfortably inside the 800-line tripwire (which counts
+  `crates/` only, so the live-run rewrite is free) — config.rs plus its tests is
+  the bulk and session.rs shrinks. If it does push past, what trails, in order,
+  is (1) session E and the orphan line, (2) the credential-shaped-key refusal
+  list (`deny_unknown_fields` still refuses them, just less kindly), and (3) the
+  `in:` union pinning test. Never the live-run config rewrite, never the
+  duplicate-table test, never session D's config. Measure the ratchets after:
+  longest-file ceiling stays 400.
+
+Acceptance: by hand, write a config into an isolated SUPERNAUT_CONFIG_DIR — `nick`,
+one `[networks.liverun]` table with the local ergo's host, port and `tls_ca`, and
+`autojoin = ["#supernaut"]` — and run `supernaut session --network liverun
+--data-dir <tmp>` with no connection flag of any kind: watch it register and land
+in #supernaut without typing `join`, the seed observed as a Join row (`wait rows
+#supernaut 1`). Then break the file four ways and read what comes back before
+anything dials: a second `[networks.liverun]` table (a parse error from the format
+itself — which is why name uniqueness is an invariant here and not an assumption
+inside `announce`), a `password = "..."` key (refused by name, pointing at the
+keyring 10b brings), `plaintext = true` against a non-loopback host, and no file
+at all (the resolved path and SUPERNAUT_CONFIG_DIR both named, exit non-zero).
+Then run scripts/live-run.sh: every session runs from a generated config with no
+`--host` anywhere in the script, session D resolves #supernaut because its config
+names the same network A's did rather than because both were pointed at one host
+string, and session E — same data dir, a config naming a different network — is
+told about no buffers and says `orphan network liverun` out loud. Separately,
+`supernaut --data-dir <tmp>` with no config file anywhere still prints the
+name/version and history lines and exits 0. cargo test --workspace and make check
+green, ratchets not worsened.
+
+Do not: add any credential surface — no keyring, no encrypted-file fallback, no
+password field, and not even an account-name reference (10b; and the refusal list
+exists so the schema cannot acquire one by accident in any version); delete
+`--sasl` or `SUPERNAUT_SASL_PASSWORD` (10b deletes both with the keyring that
+replaces them — deleting the bridge here leaves no way to authenticate at all);
+write the config file, ever, from the program or from a test (the governing
+decision; fixtures write their own files, and the parser is compiled without its
+serializer so the capability is absent rather than merely unused); autoconnect
+configured networks at startup (stage 2's embedded wiring — and session D's proof
+requires a process that dials nothing while holding a config that names what it
+would dial); add network scoping or any new filter to the search grammar (stage
+2's `/search` owns the grammar and is the only consumer that can render a hit's
+network; the union is pinned by a test here instead); migrate `debug-*` rows,
+touch the storage schema, or add a migration (network identity on disk is already
+the name config supplies, and a host-string guess merges histories
+irreversibly); put anything but network seed data in the file — no theme, no
+keybindings, no ignore lists or aliases, no `data_dir`, no retention (stage 2's
+theme file, paths stay flags/XDG, retention is a PLAN Still-open); add a
+`config`/`config check` subcommand or hot reload (the session's own refusal is
+the diagnostic today; live reload is §7.8's, with the theme file); add a
+`--config` flag or any new env knob (SUPERNAUT_CONFIG_DIR is the override
+CLAUDE.md names, and one knob per location is the whole point); grow the CLI
+grammar to multi-network verbs like `connect <name>` (one network per session
+process; multi-network drive is stage 6's, and the map core already holds is the
+part that must exist now); change the wire — PROTOCOL_VERSION stays 1 and no
+Request/Response/Event variant is added or altered (unknown variants are not
+serde-tolerant; stage 4's handshake is where additions become negotiable); add
+platform detection to live-run.sh (still the dogfood Mac, still waiting on CI);
+and add any dependency beyond `toml` and `serde` in havoc-core.
+```
+
+**Status:** complete. Shipped per the JIT detail; the six connection flags are gone
+rather than deprecated, and the live run's seq arithmetic survived A's join moving into
+config autojoin untouched — marker still seq 3, re-join still row 4, 42/42 assertions.
+Two deviations are recorded in the log entry: the multi-network deferral landed under
+PLAN **stage 5** item 1, where multi-network actually lives, not the stage 6 the detail
+named; and `parse` deserializes the text twice (once as a `toml::Table` for the
+credential-key scan, once as `Config`) so unknown-key errors keep their spans. Nothing
+was deliberately left untested except `default_config_path`'s env precedence, which has
+no unit test but is exercised by every by-hand and live-run session through
+`SUPERNAUT_CONFIG_DIR`.
 
 ---
 
@@ -1586,6 +1858,51 @@ restart, search — the "Done when" of the stage, driven end to end.
   alongside.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads
   `SUPERNAUT_SASL_PASSWORD`; the keyring path replaces both, and fixture
   credentials in the harness must stay recognisably fake (CLAUDE.md).
+- From prompt 10a: **the SASL injection site is now one place, and it is the
+  place the keyring replaces.** `run()` in `crates/supernaut/src/session.rs`
+  mutates `networks[&network].connection.sasl` *after* `Config::into_networks`
+  lowers it as `None` — config has no credential surface to lower from, by
+  design. The keyring reads the account name from config and the secret from the
+  keyring, then writes that same field: the shape does not move, only where the
+  two halves come from. `into_networks` in
+  `crates/havoc-core/src/config.rs` must keep lowering `sasl: None`.
+- From prompt 10a: **`sasl_account` must leave the credential-shaped-key refusal
+  list and enter the schema in one commit.** `CREDENTIAL_KEYS` in
+  `crates/havoc-core/src/config.rs` refuses `password`/`pass`/`sasl_password`/
+  `nickserv_password` *by name*, and `#[serde(deny_unknown_fields)]` refuses
+  everything else — so adding an account-name key to `NetworkEntry` without the
+  same commit's test update fails loudly rather than silently, which is the
+  point. Do not add `sasl_account` to the refusal list "for symmetry": an
+  account name is not a secret, and the refusal message says credentials, which
+  would then be a lie.
+- From prompt 10a: **key keyring entries by the config network *name*, never by
+  `NetworkId`.** `Config::into_networks` in `crates/havoc-core/src/config.rs`
+  numbers networks `1..N` from the `BTreeMap`'s sorted order, so adding
+  `[networks.aardvark]` renumbers every network after it. That is unobservable
+  today *only* because nothing persists a wire id — and a keyring entry keyed by
+  `NetworkId` would be the first thing that did, silently re-pointing one
+  network's credentials at another's after an unrelated config edit. The name is
+  the stable key; it is what storage keys on too.
+- From prompt 10a: **resolve the secret for the selected network only.** The
+  injection site in `crates/supernaut/src/session.rs` mutates
+  `networks.get_mut(&network)` *after* lowering, but the map deliberately holds
+  every configured network (§6.9's actor map). A keyring pass that walks the whole
+  map unlocks — or prompts for — secrets belonging to networks this process will
+  never dial, which is both a bad prompt and a wider blast radius than the session
+  needs.
+- From prompt 10a: **the live-run credential surface is two lines, and
+  `write_config` is fixed-shape.** `scripts/live-run.sh` passes
+  `SUPERNAUT_SASL_PASSWORD="$FAKE_PASS"` and `--sasl alice` on session A only, and
+  its `write_config` helper always emits exactly host/port/tls_ca (+ optional
+  autojoin) — there is no way to generate a config carrying an account key.
+  Deleting the env bridge means *extending the helper*, not just editing A's
+  invocation. Fixture credentials stay recognisably fake (CLAUDE.md).
+- From prompt 10a: **the stage-1 acceptance run against a real network now needs a
+  hand-written config in an isolated `SUPERNAUT_CONFIG_DIR`.**
+  `--host`/`--port`/`--nick`/`--join`/`--tls-ca` no longer exist and there is
+  deliberately no `--config` flag, so `supernaut session` against Libera.Chat is
+  not a one-liner any more. Budget that as an explicit step of the acceptance run
+  rather than discovering it at the end of the stage.
 
 ---
 

@@ -57,6 +57,11 @@ fn main() -> ExitCode {
 
 /// The no-subcommand path — prompt 3's documented acceptance, byte for byte:
 /// print name/version, open (creating/migrating) the store, report, exit 0.
+///
+/// It reads **no config file**, and that is the whole of NORTH-STAR §3.1's
+/// works-before-configuration property that stage 1 can honestly claim: config
+/// is mandatory for `session` only. The product's answer is stage 2's first-run,
+/// which may be neither a flags fallback nor a silent config write.
 fn open_store_and_report(data_dir: Option<PathBuf>) -> ExitCode {
     println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
 
@@ -99,6 +104,28 @@ fn open_store_and_report(data_dir: Option<PathBuf>) -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Where the network seed file lives: `SUPERNAUT_CONFIG_DIR`, then
+/// `XDG_CONFIG_HOME/supernaut`, then `$HOME/.config/supernaut`. Locating files
+/// is the binary's job; parsing them is havoc-core's (`config::parse` does no
+/// file I/O at all). One knob per location, deliberately — there is no
+/// `--config` flag, because two ways to say where the file is means two things
+/// to check when it is not found.
+pub(crate) fn default_config_path() -> Result<PathBuf, String> {
+    if let Some(dir) = std::env::var_os("SUPERNAUT_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(dir).join("config.toml"));
+    }
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|v| !v.is_empty()) {
+        return Ok(PathBuf::from(xdg).join("supernaut").join("config.toml"));
+    }
+    std::env::var_os("HOME")
+        .filter(|v| !v.is_empty())
+        .map(|home| PathBuf::from(home).join(".config/supernaut/config.toml"))
+        .ok_or_else(|| {
+            "cannot locate config.toml: none of SUPERNAUT_CONFIG_DIR, XDG_CONFIG_HOME or HOME is set"
+                .to_owned()
+        })
 }
 
 pub(crate) fn default_data_dir() -> Result<PathBuf, String> {

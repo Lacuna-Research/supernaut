@@ -135,6 +135,18 @@ pub(super) fn handle_read_outcome(state: &mut CoreState, bus: &mut Bus, outcome:
 /// gone, the replay is abandoned mid-list: under `Full` the client has been dropped
 /// by policy, so it is not a client owed a complete buffer set any more — it is a
 /// dead session, and finishing the list into a removed lane would say otherwise.
+///
+/// `by_name` collapsing two networks that share a name is **no longer a hazard to
+/// assert on**: since prompt 10a the name is a config table key, so two of them are
+/// a TOML-level parse error and the collision is unrepresentable in the parsed type.
+/// There is nothing to check here because there is nothing to represent.
+///
+/// A row whose network is *not* in config is skipped — a `BufferInfo` carrying a
+/// `NetworkId` the client cannot name is worse than an absence — but skipped
+/// **loudly**, one greppable line per orphaned network. That is the visible half of
+/// abandoning the pre-config `debug-<host>` rows; the reversible half is that
+/// storage keys networks on the same stable name config supplies, so adding
+/// `[networks."debug-localhost"]` to the file brings those buffers back.
 fn announce(
     state: &mut CoreState,
     bus: &mut Bus,
@@ -147,11 +159,12 @@ fn announce(
         .map(|(id, settings)| (settings.name.as_str(), *id))
         .collect();
     let mut announcements = Vec::new();
+    // Counted during the loop and reported after it: one line per network, not
+    // one per buffer, so a data dir full of orphans stays readable.
+    let mut orphans: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
     for row in &rows {
-        // A BufferInfo carrying a NetworkId the client cannot name is worse
-        // than an absence; the history reappears the moment the network
-        // returns to config.
         let Some(network) = by_name.get(row.network_name.as_str()).copied() else {
+            *orphans.entry(row.network_name.as_str()).or_default() += 1;
             continue;
         };
         state
@@ -165,6 +178,9 @@ fn announce(
             kind: row.kind,
             last_read_seq: row.last_read_seq,
         });
+    }
+    for (name, count) in &orphans {
+        eprintln!("orphan network {name}: {count} buffers not announced (not in config)");
     }
     for buffer in announcements {
         if !bus.direct(client, Directed::Event(Event::BufferCreated { buffer })) {

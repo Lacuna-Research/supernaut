@@ -6,7 +6,10 @@
 //! `NetworkId`s on the wire are **caller-assigned** (config-level identity,
 //! exactly what a config file gives an attached client too); the storage row
 //! id stays core-private and is mapped here. That keeps embedded and attached
-//! modes on identical footing (§4.3).
+//! modes on identical footing (§4.3). Since prompt 10a the assigner is the
+//! config *loader* — networks sorted by name, `NetworkId(1..N)` — not a human
+//! typing an `id` key; nothing persists a wire id, so renumbering across runs
+//! is unobservable.
 
 mod reads;
 
@@ -24,8 +27,10 @@ use crate::connection::{Config as ConnectionConfig, Networks};
 use crate::storage::{IngestOutcome, NetworkRow, ReadOutcome, SearchOutcome, StorageClient};
 use reads::{handle_read_outcome, handle_search_outcome, wire};
 
-/// Everything needed to reach one configured network. Flags today, config
-/// file at prompt 10.
+/// Everything needed to reach one configured network — lowered from the TOML
+/// file by [`crate::config::Config::into_networks`] since prompt 10a. `name` is
+/// the config table key, which is also the string storage keys the `network`
+/// table on: one identity, not two that must agree.
 #[derive(Debug, Clone)]
 pub struct NetworkSettings {
     pub name: String,

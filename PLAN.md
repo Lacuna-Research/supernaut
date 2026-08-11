@@ -203,6 +203,22 @@ Covers NORTH-STAR §8 M3.
    take that attached mode could not (§4.3).
 
    ### Carry-forward
+   - From stage 1 prompt 10a: **autoconnect lands here, and it re-opens prompt
+     9b's early-quit hazard.** 10a deliberately built none — `connect` is still an
+     explicit verb in `crates/supernaut/src/session.rs`, because session D's proof
+     is a process that dials nothing while holding a config that names the network
+     it would dial. When startup issues a `Connect` nobody typed, `finish()` in
+     `crates/supernaut/src/session_wait.rs` blocks on `outstanding` and exits
+     non-zero on timeout, so any path that quits early can now fail where it used
+     to succeed silently. Reach a quiescent point before quitting, or pass a
+     deadline. Config autojoin itself is safe: it issues no `Request` at all.
+   - From stage 1 prompt 10a: **the plaintext warning fires once at session start,
+     for the selected network only.** `run()` in
+     `crates/supernaut/src/session.rs` matches on `settings.security` for the one
+     resolved network before any dial. Autoconnect dialing several networks makes
+     that the wrong place outright: a plaintext network that is not the selected
+     one connects with **no warning at all**, which is §2.3's loud opt-in silently
+     failing. The warning belongs at the dial, not at startup.
    - From stage 1 prompt 5: **the event stream is duplicated and cross-lane
      unordered.** The actor emits ConnectionState on every internal state change
      (repeated `phase=connecting`), and `wiring.rs` merges directed and broadcast
@@ -221,11 +237,14 @@ Covers NORTH-STAR §8 M3.
      observed printing the event *first*. The projection must not treat the Ack as
      the marker's arrival, nor the event as confirmation of its own request.
    - From stage 1 prompt 9a: **`BufferCreated` can arrive AFTER a `Backlog`
-     response naming the same buffer.** Announcements go out on a spawned task
-     (`announce` in `crates/havoc-core/src/core/reads.rs`) while responses go out
-     inline, so the projection must tolerate a *Response* — not just an Event —
-     naming a `BufferId` it has never been told about. The note above covers the
-     opposite ordering; this is the one the attach path introduces.
+     response naming the same buffer.** `announce`
+     (`crates/havoc-core/src/core/reads.rs`) and responses both go out inline from
+     the core loop since prompt 9b — but the *storage jobs* behind them still
+     complete in their own order, so the projection must tolerate a *Response* —
+     not just an Event — naming a `BufferId` it has never been told about. (This
+     note said "a spawned task" until prompt 10a corrected it; 9b deleted the task
+     and left the ordering hazard.) The note above covers the opposite ordering;
+     this is the one the attach path introduces.
 2. **Wrapped-line cache.** The largest single piece of original UI work (§4.10): keyed
    on (buffer, width), invalidated on resize, pre-rendered `Line` window around the
    viewport. Its own module, property-tested over random resize sequences (§6.7).
@@ -254,6 +273,20 @@ Covers NORTH-STAR §8 M3.
      PRIVMSG returns as a `MessageAdded` because `echo-message` is requested, and
      that is the only confirmation that exists; on a server without it, "sent" is
      unconfirmable by anyone.
+   - From stage 1 prompt 10a: **`in:` is a buffer-*name* filter with no network
+     scope, and `/search` owns the grammar that would give it one.** Prompt 10a
+     killed the accretion *cause* (stable config names mean one `network` row per
+     network, not one per `debug-<host>` string) but left the union: two networks
+     with a `#rust` each are one `in:#rust` result set. Scoping is a grammar
+     question — `in:net/#chan` versus a separate `network:` filter — and this is
+     the only consumer that can render which network a hit came from; the debug
+     CLI prints `buffer=<id>`, so a scope filter is unobservable there. The
+     current behaviour is documented on `SearchSpec.buffer`
+     (`crates/havoc-core/src/search.rs`) and `run_search`
+     (`crates/havoc-core/src/storage/query.rs`), and **pinned** by
+     `in_filter_unions_one_buffer_name_across_networks` in
+     `crates/havoc-core/src/storage/tests.rs` — so changing it here is a
+     documented behaviour change with a failing test, not a discovered assumption.
    - From stage 1 prompt 8: **bare hyphenated search terms are FTS5 column-
      filter syntax** (`xyzzy-quicksilver` → "no such column") — the error
      returns cleanly, but the `/search` UX here should quote bare terms
@@ -269,6 +302,36 @@ Covers NORTH-STAR §8 M3.
 7. **First-run experience.** Pick a network, type a nick, you are on IRC with TLS,
    SASL, sane colors, and working search (§3.1). The default configuration is the
    product (§2.1).
+
+   ### Carry-forward
+   - From stage 1 prompt 10a: **first-run may not inherit "config is mandatory",
+     and may not answer it by writing the file.** 10a made
+     `$XDG_CONFIG_HOME/supernaut/config.toml` mandatory for the `session`
+     subcommand only; the no-subcommand path (`crates/supernaut/src/main.rs`'s
+     `open_store_and_report`) still runs with no config file anywhere, and that is
+     the whole of §3.1's works-before-configuration property stage 1 can honestly
+     claim. The product's answer is *this item*, and it can be neither a flags
+     fallback (the six connection flags were deleted, deliberately, so config is
+     not the decorative path) nor a silent config write — the 2026-08-10
+     config-vs-runtime-state decision forbids the program ever writing that file,
+     and havoc-core is compiled without a TOML serializer, so it cannot. An
+     explicit, user-confirmed "save this to config" action is the shape that is
+     allowed, and it needs the `display` feature back plus its own decision entry.
+   - From stage 1 prompt 10a: **the loopback-only plaintext rule is stricter than
+     NORTH-STAR §2.3 asks, and relaxing it is this item's call.** §2.3 demands a
+     loud opt-in; `NetworkEntry::plaintext` in
+     `crates/havoc-core/src/config.rs` additionally refuses any non-loopback host.
+     It was kept at 10a because it is the debug-grade rule stage 1 shipped — but a
+     user with a plaintext LAN bouncer first appears here.
+   - From stage 1 prompt 10a: **config validation is a property of `config::parse`,
+     not of the `Config` type.** In `crates/havoc-core/src/config.rs` the fields are
+     public and `validate` is private, while `into_networks` is `pub` — so a wizard
+     that builds a `Config` in code and hands it straight to `into_networks` skips
+     the loopback-only plaintext rule, the autojoin line-integrity rule, and
+     `tls_ca`'s base-dir resolution, silently. Either the wizard round-trips its
+     answers through `parse` (which also means it must produce TOML text, which the
+     no-serializer decision makes deliberate work), or validation moves into
+     `into_networks`. Decided here, with a real second constructor in front of it.
 
 **Done when:** you can spend a full day in it as your only client on one network and
 never reach for irssi.
@@ -354,6 +417,14 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
      buffer N") history of buffers the announcement deliberately withheld.
      Harmless under single-user filesystem auth; decide whether the skip rule
      becomes a real check once the socket makes clients plural.
+   - From stage 1 prompt 10a: **`Search` is the second hole in that same skip, and
+     it needs no id probing.** `run_search` in
+     `crates/havoc-core/src/storage/query.rs` has no network filter at all, so a
+     hit can come back carrying a `BufferId` on a network the client's config does
+     not name — history the attach announcement deliberately withheld (10a made
+     that skip loud: `orphan network <name>: N buffers not announced`). Same
+     advisory-not-a-boundary decision as the note above, and it wants the same
+     answer at the same time.
 2. **Capability handshake.** Feature lists exchanged, intersection operated on; no
    version lockstep (§4.8). The constants live in `havoc-ipc`.
 
@@ -375,6 +446,18 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
    lifecycle and orphan cleanup; detach loses nothing, attach renders from buffers +
    read markers alone (§4.5).
 
+   ### Carry-forward
+   - From stage 1 prompt 10a: **the orphan-network report is engine stderr only, so
+     the daemon breaks the abandonment decision's "made visible" half.** `announce`
+     in `crates/havoc-core/src/core/reads.rs` prints `orphan network <name>: N
+     buffers not announced (not in config)` with `eprintln`, once per attach —
+     embedded mode puts that on the user's terminal, but under the daemon it goes to
+     the daemon's stderr and the attaching client sees *nothing*: history silently
+     missing, with the explanation in a file the user is not reading. 10a's fence
+     forbade a new `Event` variant at v1, which is why it shipped as a log line;
+     this is where it needs either a frame representation (with stage 4's handshake
+     gating the variant) or a documented, discoverable log location.
+
 **Done when:** kill the TUI while the daemon holds the connection, reattach, and the
 buffer looks right.
 
@@ -386,6 +469,21 @@ Covers NORTH-STAR §8 M6.
 
 1. **Multi-network.** Config and UI for 2–5 networks; the actor map has existed since
    stage 1, so this is surface, not surgery (§6.9).
+
+   ### Carry-forward
+   - From stage 1 prompt 10a: **three config fields were left out because a
+     one-network stage cannot observe them, and this item is where each becomes
+     real.** In `crates/havoc-core/src/config.rs`: (1) a **per-network nick**
+     override — `nick` is top-level and global today, and `username`/`realname`
+     are derived from it in `into_networks`; (2) **`server_name`**, for an
+     SNI/connect-host split — `Security::Tls.server_name` is currently always the
+     dialed `host`, which a bouncer or a round-robin front end breaks; (3) an
+     explicit **`id` key**, but *only* if a wire `NetworkId` ever gets persisted or
+     cached across restarts. Ids are assigned by the loader today — networks
+     sorted by name, `NetworkId(1..N)` — and renumbering is unobservable precisely
+     because nothing persists them (`ensure_network` keys the `network` table on
+     the name). Persisting one turns renumbering into data corruption and makes
+     the id a config field, with a uniqueness rule and a migration.
 2. **`CHATHISTORY` resync.** Reconnect fetches only what was missed, merges by `msgid`,
    renders in order with original timestamps (§7.2). Tested against a bouncer/ergo
    replaying (§6.4) — the laptop-lid test, with zero duplicates.
