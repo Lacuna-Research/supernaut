@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 9/12 complete. Next: prompt 9b.
+**Status:** 10/12 complete. Next: prompt 10a.
 
 <!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
@@ -1495,6 +1495,16 @@ invariant, and `wait rows` exists so the script never needs to); and new
 dependencies (nothing here needs one).
 ```
 
+**Status:** complete. Shipped per the JIT detail, with the lane rewrite as the
+expensive half: `Bus::direct` is the one synchronous primitive at 4096 slots, so no
+path in the core loop awaits a client, and the attach replay is inline rather than a
+task. Markers set, broadcast, persisted, and handed to a process that never dialled
+anything; `quit` drains, proved by counting the responses that used to be discarded
+(3 in b.out, 502 in c.out). Four ratchet-forced file splits, all pure moves along
+named seams — and the review caught the 65-buffer attach test passing against the
+engine it was written to pin, which is recorded in the addendum as the lesson of the
+prompt.
+
 ---
 
 ## Prompt 10a — Network config file
@@ -1503,9 +1513,10 @@ dependencies (nothing here needs one).
 **Branch:** `prompt-10a-config`
 
 The TOML config file (§5.8): networks (host, port, tls_ca, caller-assigned ids,
-stable names), nick, autojoin — as seed data, per whatever the
-config-vs-runtime-state Still-open decides (it blocks this prompt). The debug
-CLI runs from config alone for everything except credentials. **Deliberately no
+stable names), nick, autojoin — as **seed data only**: the
+config-vs-runtime-state question is answered (BUILD-LOG, 2026-08-10 — the
+database owns runtime state and the program never writes the config file). The
+debug CLI runs from config alone for everything except credentials. **Deliberately no
 credential surface of any kind in this half**: SASL stays on the
 `SUPERNAUT_SASL_PASSWORD` env bridge until 10b replaces it — the original
 prompt's fence warned that config-without-credentials ships the
