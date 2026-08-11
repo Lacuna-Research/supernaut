@@ -31,20 +31,32 @@ pub(crate) fn print_event(state: &mut SessionState, event: &Event) {
         }
         Event::BufferCreated { buffer } => {
             state.buffers.insert(buffer.name.clone(), buffer.id);
+            // last_read is printed because the attach announcement is the only
+            // place a marker set by another process becomes observable.
             println!(
-                "event buffer-created buffer={} network={} name={}",
-                buffer.id.0, buffer.network.0, buffer.name
+                "event buffer-created buffer={} network={} name={} last_read={}",
+                buffer.id.0,
+                buffer.network.0,
+                buffer.name,
+                buffer
+                    .last_read_seq
+                    .map_or_else(|| "-".to_owned(), |seq| seq.0.to_string())
             );
         }
         Event::MessageAdded { message } => {
-            *state.msg_counts.entry(message.buffer).or_default() += 1;
+            state
+                .msg_counts
+                .entry(message.buffer)
+                .or_default()
+                .record(message.kind);
             println!(
                 "event message-added buffer={} seq={}",
                 message.buffer.0, message.seq.0
             );
         }
+        // No counting here: `wait search` counts *responses* now, like every
+        // other wait target, so a failed search ends its wait too.
         Event::SearchResults { request, hits } => {
-            state.search_count += 1;
             println!(
                 "event search-results request={} hits={}",
                 request.0,

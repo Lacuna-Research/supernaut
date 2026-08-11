@@ -14,6 +14,8 @@ mod exec;
 mod identity;
 mod migrations;
 mod query;
+mod records;
+mod rows;
 
 use std::fmt;
 use std::path::Path;
@@ -21,11 +23,11 @@ use std::sync::mpsc;
 use std::thread;
 
 use exec::run;
-use std::collections::BTreeMap;
 
-use havoc_ipc::{Anchor, BufferId, BufferKind, MessageKind, NetworkId, Seq, ServerTime};
+use havoc_ipc::{Anchor, BufferId, BufferKind, NetworkId, Seq};
 pub use identity::{buffer_kind_str, kind_code, kind_from_code};
 pub use migrations::MigrationReport;
+pub use records::{BufferRow, Ingest, IngestOutcome, ReadOutcome, SearchOutcome, StoredMessage};
 use rusqlite::{Connection, OpenFlags};
 
 #[derive(Debug)]
@@ -71,90 +73,6 @@ impl From<rusqlite::Error> for StorageError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NetworkRow(pub(crate) i64);
 
-/// One classified line on its way to disk. Core-private: the wire `Message`
-/// has no msgid berth, deliberately — dedup is storage's business.
-#[derive(Debug, Clone)]
-pub struct Ingest {
-    /// Buffer name: channel, or peer nick for queries.
-    pub target: String,
-    pub kind: MessageKind,
-    pub nick: Option<String>,
-    pub account: Option<String>,
-    pub text: Option<String>,
-    pub server_time: ServerTime,
-    /// Server msgid when tagged; storage synthesizes `fnv:<hex>` otherwise.
-    pub msgid: Option<String>,
-    /// Remaining tags, stored as CBOR (NULL when empty).
-    pub tags: BTreeMap<String, String>,
-}
-
-/// A finished search, correlated back to its requester.
-#[derive(Debug)]
-pub struct SearchOutcome {
-    pub client: crate::bus::ClientId,
-    pub request: havoc_ipc::RequestId,
-    /// Err carries the SQLite message (a malformed MATCH string is user
-    /// input; it comes back as a Response::Error, never a hang).
-    pub result: Result<Vec<(BufferId, StoredMessage)>, String>,
-}
-
-/// One row of the `buffer` table, for the attach-time announcement. Storage
-/// rows stay core-private (prompt 3's fence): this carries the *network name*,
-/// never a caller `NetworkId` — the row knows a `NetworkRow`, and minting a
-/// wire id inside storage is the id-space confusion `NetworkRow` exists to
-/// kill. Core maps the name back.
-#[derive(Debug, Clone)]
-pub struct BufferRow {
-    pub id: BufferId,
-    pub network_name: String,
-    pub name: String,
-    pub kind: BufferKind,
-    /// Read from migration 0001's column. Nothing writes it until prompt 9b,
-    /// so every value is NULL today — filling a field the wire already froze
-    /// costs nothing and saves 9b a second pass through the read path.
-    pub last_read_seq: Option<Seq>,
-}
-
-/// A finished read job, correlated back to the session that caused it. One
-/// reply lane for both, not two: core grows a single select arm.
-#[derive(Debug)]
-pub enum ReadOutcome {
-    Backlog {
-        client: crate::bus::ClientId,
-        request: havoc_ipc::RequestId,
-        /// `Err` is a client bug (unknown buffer, zero limit); an empty window
-        /// is `Ok(vec![])`, the end-of-scrollback signal.
-        result: Result<Vec<(BufferId, StoredMessage)>, String>,
-    },
-    Buffers {
-        client: crate::bus::ClientId,
-        result: Result<Vec<BufferRow>, String>,
-    },
-}
-
-/// What one ingest produced, reported after commit.
-#[derive(Debug, Clone)]
-pub struct IngestOutcome {
-    pub network: NetworkId,
-    pub buffer: BufferId,
-    pub buffer_name: String,
-    pub buffer_kind: BufferKind,
-    /// True only when this ingest inserted the buffer row itself.
-    pub buffer_created: bool,
-    /// `None` for a dedup hit: no seq consumed, no event owed.
-    pub message: Option<StoredMessage>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StoredMessage {
-    pub seq: Seq,
-    pub kind: MessageKind,
-    pub nick: Option<String>,
-    pub text: Option<String>,
-    pub server_time: ServerTime,
-    pub tags: BTreeMap<String, String>,
-}
-
 enum Job {
     SchemaVersion {
         reply: mpsc::Sender<i64>,
@@ -185,6 +103,19 @@ enum Job {
         buffer: BufferId,
         anchor: Anchor,
         limit: u32,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
+    },
+    /// One row's worth of write: move a buffer's read marker. Its own job
+    /// rather than a batched ingest, deliberately — batching exists to amortize
+    /// fsync over history at IRC's line rate; a marker is human-paced and one
+    /// row, and delaying it 100ms would make the Ack a lie. Falling behind the
+    /// same flush barrier the reads use is what makes the persisted marker never
+    /// ahead of persisted history.
+    SetReadMarker {
+        buffer: BufferId,
+        seq: Seq,
         client: crate::bus::ClientId,
         request: havoc_ipc::RequestId,
         reply: tokio::sync::mpsc::Sender<ReadOutcome>,
@@ -326,6 +257,26 @@ impl StorageClient {
             buffer,
             anchor,
             limit,
+            client,
+            request,
+            reply,
+        })
+    }
+
+    /// Fire-and-forget read-marker write, behind the same flush barrier — so
+    /// the persisted marker is never ahead of the persisted history it points
+    /// into, which is what makes it safe to read back after a crash.
+    pub fn set_read_marker(
+        &self,
+        buffer: BufferId,
+        seq: Seq,
+        client: crate::bus::ClientId,
+        request: havoc_ipc::RequestId,
+        reply: tokio::sync::mpsc::Sender<ReadOutcome>,
+    ) -> Result<(), StorageError> {
+        self.send(Job::SetReadMarker {
+            buffer,
+            seq,
             client,
             request,
             reply,

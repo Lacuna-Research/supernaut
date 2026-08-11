@@ -6,19 +6,18 @@
 //! name→BufferId projection the TUI will keep. `wait` verbs exist so
 //! live-run.sh never sleeps.
 
-use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::collections::HashMap;
 
 use havoc_core::connection::io::Security;
 use havoc_core::connection::{SaslConfig, SaslCredentials, SaslMechanism};
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::Storage;
 use havoc_ipc::{BufferId, ConnectionPhase, NetworkId, Request, RequestBody, RequestId, Seq};
-use havoc_transport::{ClientTransport, InProcess, Incoming, TransportError};
+use havoc_transport::{ClientTransport, InProcess};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
-use crate::session_backlog::{print_backlog, request_backlog};
-use crate::session_print::print_event;
+use crate::session_backlog::request_backlog;
+use crate::session_wait::{Answered, Awaited, MsgCounts, finish, handle_incoming, wait_command};
 use crate::wiring;
 
 #[derive(clap::Args, Debug)]
@@ -134,14 +133,16 @@ pub(crate) struct SessionState {
     pub(crate) transport: InProcess,
     pub(crate) next_request: u64,
     pub(crate) buffers: HashMap<String, BufferId>,
-    pub(crate) msg_counts: HashMap<BufferId, u64>,
-    pub(crate) search_count: u64,
+    /// Per-buffer message tallies, kind-aware: see [`MsgCounts`].
+    pub(crate) msg_counts: HashMap<BufferId, MsgCounts>,
     /// The newest search hit per buffer — what `backlog <b> around-hit` uses.
     pub(crate) last_hits: HashMap<BufferId, Seq>,
-    /// Backlog requests awaiting an answer. `wait backlog` counts *responses*,
-    /// so an Error ends the wait with something printed rather than a timeout.
-    pub(crate) backlog_pending: HashSet<RequestId>,
-    pub(crate) backlog_count: u64,
+    /// Every request that has not been answered yet, classified at send time.
+    /// One structure with one insert site (`request`) and one remove site
+    /// (`handle_incoming`), so a new verb cannot forget to register — and so
+    /// `quit` knows what it is still owed.
+    pub(crate) outstanding: HashMap<RequestId, Awaited>,
+    pub(crate) answered: Answered,
     pub(crate) phase: Option<ConnectionPhase>,
 }
 
@@ -151,10 +152,9 @@ async fn drive(transport: InProcess) -> Result<(), String> {
         next_request: 1,
         buffers: HashMap::new(),
         msg_counts: HashMap::new(),
-        search_count: 0,
         last_hits: HashMap::new(),
-        backlog_pending: HashSet::new(),
-        backlog_count: 0,
+        outstanding: HashMap::new(),
+        answered: Answered::default(),
         phase: None,
     };
 
@@ -170,7 +170,9 @@ async fn drive(transport: InProcess) -> Result<(), String> {
                             return Ok(());
                         }
                     }
-                    None => return Ok(()),
+                    // stdin EOF is a quit: drain, or the runtime drop
+                    // discards everything still in flight.
+                    None => return finish(&mut state, 10).await,
                 }
             }
             incoming = state.transport.recv() => {
@@ -197,7 +199,16 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
     let mut parts = command.split_whitespace();
     match parts.next() {
         None => Ok(true),
-        Some("quit") => Ok(false),
+        Some("quit") => {
+            // `quit [secs]`: wait for what the engine still owes before the
+            // runtime drops underneath it.
+            finish(
+                state,
+                parts.next().and_then(|s| s.parse().ok()).unwrap_or(10),
+            )
+            .await?;
+            Ok(false)
+        }
         Some("connect") => {
             request(state, RequestBody::Connect { network: NETWORK }).await?;
             Ok(true)
@@ -232,39 +243,40 @@ async fn dispatch(state: &mut SessionState, command: &str) -> Result<bool, Strin
             request(state, RequestBody::SendText { buffer, text }).await?;
             Ok(true)
         }
+        Some("mark-read") => {
+            let Some(name) = parts.next() else {
+                println!("error - mark-read requires a buffer and a seq");
+                return Ok(true);
+            };
+            let Some(seq) = parts.next().and_then(|s| s.parse().ok()) else {
+                println!("error - mark-read requires a seq");
+                return Ok(true);
+            };
+            // The same name->BufferId projection `send` and `backlog` use, which
+            // includes buffers this process only learned of from the attach
+            // announcement.
+            let Some(&buffer) = state.buffers.get(name) else {
+                println!("error - no buffer for {name} (join it, or attach over its history)");
+                return Ok(true);
+            };
+            request(
+                state,
+                RequestBody::SetReadMarker {
+                    buffer,
+                    seq: Seq(seq),
+                },
+            )
+            .await?;
+            Ok(true)
+        }
         Some("backlog") => {
             let rest: Vec<&str> = parts.collect();
             request_backlog(state, &rest).await?;
             Ok(true)
         }
         Some("wait") => {
-            // registered [secs] | buffer <name> [secs] | message <name> [count] [secs]
-            let target = parts.next().unwrap_or("").to_owned();
             let rest: Vec<&str> = parts.collect();
-            let (name, count, secs) = match target.as_str() {
-                "registered" => (
-                    None,
-                    1,
-                    rest.first().and_then(|s| s.parse().ok()).unwrap_or(10),
-                ),
-                "buffer" => (
-                    rest.first().map(|s| (*s).to_owned()),
-                    1,
-                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(10),
-                ),
-                "message" => (
-                    rest.first().map(|s| (*s).to_owned()),
-                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(1),
-                    rest.get(2).and_then(|s| s.parse().ok()).unwrap_or(10),
-                ),
-                "search" | "backlog" => (
-                    None,
-                    rest.first().and_then(|s| s.parse().ok()).unwrap_or(1),
-                    rest.get(1).and_then(|s| s.parse().ok()).unwrap_or(10),
-                ),
-                _ => (None, 1, 10),
-            };
-            wait(state, &target, name, count, secs).await?;
+            wait_command(state, &rest).await?;
             Ok(true)
         }
         Some(other) => {
@@ -280,94 +292,16 @@ pub(crate) async fn request(
 ) -> Result<RequestId, String> {
     let id = RequestId(state.next_request);
     state.next_request += 1;
+    // Classified from the body itself: the one insert site, so a verb added
+    // later cannot forget to register and leave `quit` unaware of it.
+    let awaited = Awaited::from(&body);
     state
         .transport
         .send(Request { id, body })
         .await
         .map_err(|e| format!("send: {e}"))?;
+    state.outstanding.insert(id, awaited);
     Ok(id)
-}
-
-/// `wait registered|buffer|message ...`: consume (and still print) events
-/// until the predicate holds or the deadline names itself.
-async fn wait(
-    state: &mut SessionState,
-    target: &str,
-    name: Option<String>,
-    count: u64,
-    secs: u64,
-) -> Result<(), String> {
-    let satisfied = |state: &SessionState| match target {
-        "registered" => state.phase == Some(ConnectionPhase::Registered),
-        "buffer" => name
-            .as_deref()
-            .is_some_and(|n| state.buffers.contains_key(n)),
-        "message" => name.as_deref().is_some_and(|n| {
-            state
-                .buffers
-                .get(n)
-                .is_some_and(|id| state.msg_counts.get(id).copied().unwrap_or(0) >= count)
-        }),
-        "search" => state.search_count >= count,
-        "backlog" => state.backlog_count >= count,
-        _ => true,
-    };
-    if !matches!(
-        target,
-        "registered" | "buffer" | "message" | "search" | "backlog"
-    ) {
-        println!("error - wait knows 'registered', 'buffer', 'message', 'search', and 'backlog'");
-        return Ok(());
-    }
-
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(secs);
-    while !satisfied(state) {
-        let incoming = tokio::time::timeout_at(deadline, state.transport.recv()).await;
-        match incoming {
-            Ok(incoming) => handle_incoming(state, incoming)?,
-            Err(_) => {
-                return Err(format!(
-                    "wait {target} {} timed out after {secs}s",
-                    name.as_deref().unwrap_or("")
-                ));
-            }
-        }
-    }
-    println!("waited {target} {}", name.as_deref().unwrap_or(""));
-    Ok(())
-}
-
-fn handle_incoming(
-    state: &mut SessionState,
-    incoming: Result<Incoming, TransportError>,
-) -> Result<(), String> {
-    match incoming {
-        Ok(Incoming::Response(response)) => {
-            if state.backlog_pending.remove(&response.id) {
-                state.backlog_count += 1;
-            }
-            match response.body {
-                havoc_ipc::ResponseBody::Ack => println!("ok {}", response.id.0),
-                havoc_ipc::ResponseBody::Error { message } => {
-                    println!("error {} {message}", response.id.0);
-                }
-                havoc_ipc::ResponseBody::Backlog { messages } => {
-                    print_backlog(response.id, &messages);
-                }
-            }
-            Ok(())
-        }
-        Ok(Incoming::Event(event)) => {
-            print_event(state, &event);
-            Ok(())
-        }
-        // Lagged is loud but survivable; Closed ends the session.
-        Err(TransportError::Lagged(n)) => {
-            eprintln!("transport lagged: missed {n} events");
-            Ok(())
-        }
-        Err(TransportError::Closed) => Err("transport closed".to_owned()),
-    }
 }
 
 fn is_loopback(host: &str) -> bool {

@@ -1,9 +1,10 @@
-//! Ingest/identity/search tests for the storage thread — split from mod.rs
-//! for the size ratchet alone. Real temp-file SQLite throughout; a mock would
-//! test the mock. The backlog windows live in the `backlog` submodule, same
-//! reason; it reuses `item`/`drain` from here.
+//! Ingest/identity/search tests for the storage thread — split from mod.rs for
+//! the size ratchet alone. Real temp-file SQLite throughout; a mock would test
+//! the mock. The backlog windows and the read markers live in the `backlog` and
+//! `markers` submodules, same reason; both reuse `item`/`drain` from here.
 use super::*;
-use havoc_ipc::MessageKind;
+use havoc_ipc::{MessageKind, ServerTime};
+use std::collections::BTreeMap;
 
 fn temp_store() -> (std::path::PathBuf, Storage, StorageClient) {
     let dir = std::env::temp_dir().join(format!(
@@ -287,3 +288,4 @@ fn v1_database_upgrades_and_backfills() {
 }
 
 mod backlog;
+mod markers;

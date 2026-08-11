@@ -11,7 +11,7 @@ use havoc_core::connection::io::Security;
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::{Storage, StorageClient};
 use havoc_ipc::{
-    Anchor, BufferId, Event, NetworkId, Request, RequestBody, RequestId, ResponseBody,
+    Anchor, BufferId, BufferKind, Event, NetworkId, Request, RequestBody, RequestId, ResponseBody,
 };
 
 fn settings(name: &str) -> NetworkSettings {
@@ -92,7 +92,7 @@ async fn attach_announces_unseen_buffers_and_serves_windows() {
     );
     assert!(
         announced.last_read_seq.is_none(),
-        "nothing writes last_read_seq until prompt 9b"
+        "no marker has been set for this buffer, so the column is still NULL"
     );
     assert!(
         a.broadcast.try_recv().is_err(),
@@ -191,6 +191,74 @@ async fn a_buffer_on_an_unconfigured_network_is_not_announced() {
             .is_err(),
         "an unresolvable buffer must never be announced"
     );
+
+    drop(core);
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The lane-capacity claim at the dispatch level, and the test that deadlocks
+/// against the pre-9b engine: 65 buffers is more than the old 64-slot lane could
+/// hold, so the replay filled it while the core loop awaited a client that was
+/// not reading. Attach a bare `Session` with no pump at all, ask for a window,
+/// and every announcement must arrive **before** the correlated Response with the
+/// lane still alive.
+#[tokio::test]
+async fn a_sixty_five_buffer_attach_replays_before_the_response() {
+    let (dir, storage) = store("corebacklog-65");
+    let client = storage.client();
+    let network = client.ensure_network("seed-net").expect("network");
+    for i in 1..=65 {
+        client
+            .ensure_buffer(network, &format!("#b{i}"), BufferKind::Channel)
+            .expect("buffer");
+    }
+
+    let core = Core::spawn(
+        storage.client(),
+        HashMap::from([(NetworkId(1), settings("seed-net"))]),
+        false,
+    );
+    // No pump, no reader task: this session drains only when the assertions
+    // below say so, which is exactly the client the old lane could deadlock on.
+    let mut a = core.attach().await;
+
+    let mut names = Vec::new();
+    for _ in 0..65 {
+        match a.directed.recv().await.expect("all 65 announcements") {
+            Directed::Event(Event::BufferCreated { buffer }) => names.push(buffer.name),
+            other => panic!("expected an announcement, got {other:?}"),
+        }
+    }
+    assert_eq!(names.len(), 65, "one per buffer, none dropped");
+    assert!(names.contains(&"#b65".to_owned()));
+
+    assert!(
+        a.directed.try_recv().is_err(),
+        "the replay is exactly the 65 announcements, nothing more"
+    );
+
+    a.requests
+        .send((
+            a.id,
+            Request {
+                id: RequestId(65),
+                body: RequestBody::FetchBacklog {
+                    buffer: BufferId(1),
+                    anchor: Anchor::Latest,
+                    limit: 5,
+                },
+            },
+        ))
+        .await
+        .expect("send");
+    match a.directed.recv().await.expect("the window, on a live lane") {
+        Directed::Response(response) => {
+            assert_eq!(response.id, RequestId(65));
+            assert!(matches!(response.body, ResponseBody::Backlog { .. }));
+        }
+        other => panic!("expected the correlated Response, got {other:?}"),
+    }
 
     drop(core);
     drop(storage);

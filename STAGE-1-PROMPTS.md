@@ -1187,55 +1187,313 @@ Still-open) and no `draft/read-marker` upstream.
 **Split from the original prompt 9**: markers alone are small, which is exactly
 the room the accumulated verb/drain hardening needs.
 
-*To be written out before it starts.*
+```
+Read markers, for real, and the delivery policy that stopped being optional:
+after this prompt a person marks a buffer read in one process, watches the
+change come back as broadcast state, quits, and a second process that never
+dials anything is *told* where the marker is at attach — and no client, healthy
+or wedged, can stall or be silently starved by the engine on the way there.
 
-### Carry-forward
+Four places the notes, the item, and the frozen wire pull apart, surfaced
+rather than resolved silently:
 
-- From prompt 7: **`wait message` counts every MessageAdded kind (Joins
-  included), and the harness's contiguity assert lives in live-run.sh now.**
-  When the verbs grow their drain here, make counting kind-aware or asserts
-  exact — the dedup-consumes-no-seq invariant is policed by
-  `COUNT(*) == MAX(seq)` in the script; keep it that way.
-- From prompt 7: **`quit` (and stdin EOF) races in-flight requests — the
-  runtime drop discards everything still queued.** Carol's flood lost ~300
-  sends until the harness drained via her own echo count
-  (`crates/supernaut/src/session.rs` `drive()` returns and `main` drops the
-  runtime). Give quit a drain: wait for outstanding RequestIds to resolve, or
-  document at-most-once for fire-and-forget verbs.
-- From prompt 6: **commands issued while disconnected vanish with no signal.**
-  `ActorCommand`s are drained and dropped during the backoff sleep in
-  `crates/havoc-core/src/connection/actor.rs`, and nothing reports the drop —
-  a `send` acknowledged by dispatch may never have gone out. Decide here
-  whether "sent" needs an actor-side outcome or a documented at-most-once
-  caveat, before the TUI composer inherits it.
-- From prompt 9a: **the replay task and `try_direct` fight over the same
-  64-slot lane, and search still awaits it.** `Bus::try_direct`
-  (`crates/havoc-core/src/bus.rs`) drops the lane on Full, while the
-  announcement task (`crates/havoc-core/src/core/reads.rs`, `announce`)
-  deliberately fills it — up to one message per buffer against
-  `mpsc::channel(64)`. `handle_search_outcome` still `.await`s `bus.direct`, so
-  a client that awaits a Response without draining events can be deadlocked by
-  a replay it never asked for; and a replay task parked on a wedged lane holds
-  its Sender clone indefinitely, making the Full-drop outcome nondeterministic
-  (zombie vs loud-kill). Decide the fate of both awaits together, and add the
-  >64-buffer attach as the test (a bare `Session` with no pump over a
-  65-buffer store, then a `FetchBacklog`).
-- From prompt 9a: **`wait backlog` is response-counting and `wait search` is
-  event-counting, in one struct.** `SessionState` carries both
-  `backlog_pending`/`backlog_count` and the older `search_count`
-  (`crates/supernaut/src/session.rs`); when fixing `wait search`, replace
-  `search_count` with the `backlog_pending` pattern rather than adding a
-  parallel one — and the response counter must stay BEFORE the body match in
-  `handle_incoming` or errors go back to being invisible.
-- From prompt 9a: **live-run.sh's announcement proof depends on "the deployment
-  failed" being inside `#supernaut`'s last five rows.** Session D reads
-  `backlog #supernaut latest 5`; any traffic a mark-read segment adds to A's
-  #supernaut before quit silently pushes the line out of the window, and the
-  failure reads as "announcement broke". Anchor D's read (`after:0`, or a larger
-  limit) before adding #supernaut traffic.
-- From prompt 9a: **`SetReadMarker` still answers "SetReadMarker arrives in
-  prompt 9".** `crates/havoc-core/src/core.rs` — fix the string as part of
-  replacing the arm.
+- The PLAN item is the smaller half of this prompt. "`last_read_seq` set/read
+  per buffer" is one job, one arm, one verb; the notes carry a delivery-policy
+  rewrite that touches every path prompts 5-9a shipped. That is what the
+  9a/9b split bought and it is spent here deliberately — but it means the
+  line budget belongs to the lane rewrite, not to markers.
+- This prompt supersedes a decision one prompt old: "read answers are
+  dropped, not awaited: `Bus::try_direct`" (BUILD-LOG, 2026-08-10). Its own
+  Revisit-if names this prompt, so this is sanctioned rather than a
+  violation, and its asymmetry argument survives intact — writes are never
+  dropped, reads are re-askable. What changes is the mechanism: dropping a
+  read at 64 slots was never the real bound, because a second writer (the
+  replay task) could park on the same lane and make the drop
+  nondeterministic. One writer, one rule, below.
+- The wire cannot express a per-client marker at v1, so shipping markers ships
+  the machine-wide one. `Event::ReadMarkerChanged { buffer, seq }` has no
+  client field and `buffer.last_read_seq` is one nullable column
+  (migration 0001) — the representable set was fixed by prompt 3, not
+  chosen here. So this prompt broadcasts the marker and says so, and the
+  Still-open on reconciliation stays open: it is answered by a schema and a
+  wire that can hold two markers, neither of which exists yet.
+- Kind-aware counting changes numbers in live-run.sh, and session D's window
+  is fragile to exactly that. Sequencing, not conflict: D's read is
+  re-anchored first, in the same commit, before any verb semantics move.
+
+The work:
+
+- No wire change. PROTOCOL_VERSION stays 1; `RequestBody::SetReadMarker`,
+  `Event::ReadMarkerChanged`, and `BufferInfo.last_read_seq` are the berths
+  prompt 2 froze and prompt 9a already reads. Doc comments do change (as 9a's
+  addendum did for `BufferCreated`): `ReadMarkerChanged` states that it is
+  broadcast core-owned state, one marker per buffer for the whole machine,
+  and that per-client markers are a stage-6 schema change, not a field.
+- `SetReadMarker` is a write with a deferred response, mirroring the
+  `Search`/`FetchBacklog` arms in `crates/havoc-core/src/core.rs`: the arm
+  enqueues and `return None`; a failed enqueue becomes an immediate
+  `Error("storage unavailable: {e}")`, never a swallowed promise. The stale
+  `error("SetReadMarker arrives in prompt 9")` string dies with the arm. On
+  the outcome: `ResponseBody::Ack` on the requester's directed lane and
+  `Event::ReadMarkerChanged` on the broadcast lane; on `Err`, the `Error`
+  response and no event — search's rule, and the reason is the same (a failed
+  write is not state).
+- Broadcast, not directed, and it is not a leak: §4.5 puts read markers in the
+  Core column, the value is the same one `announce` already hands every
+  attaching client in `BufferInfo.last_read_seq`, and a marker moved by one
+  client is a marker moved for the machine as long as the column is one
+  column. `Bus::broadcast`'s `debug_assert` list stays `SearchResults`-only —
+  `ReadMarkerChanged` carries no `RequestId`, which is the structural tell.
+  The Ack and the event travel different lanes and are therefore unordered
+  relative to each other; that is documented, and it is why the CLI's wait
+  counts responses (below) rather than events.
+- Marker semantics, decided: a marker may move backward. The client is the
+  authority on where a person has read to, and scrolling back to an unread
+  point is a real product action; a monotonic clamp in the engine refuses a
+  legitimate request with no way to report it, and "highest wins" is precisely
+  the last-write-wins reconciliation rule the Still-open owns — pre-deciding it
+  here inside an `UPDATE` is how that question gets answered by accident.
+  Last write wins, no clamp.
+- `seq < 1` is an `Error("read marker seq must be at least 1")` — asking to
+  mark nothing read is a client bug and answering it politely hides it, the
+  same call `limit == 0` got in 9a. The seq is not checked for existence
+  and never clamped to `MAX(seq)`: a marker is a position, not a row
+  reference, and retention (stage 6) will make gaps real — the same reasoning
+  `AroundSearchHit` over a vanished seq already ships with.
+- Unknown buffer is an `Error("unknown buffer N")`, decided by the `UPDATE`'s
+  own `changes()` rather than a preceding `EXISTS` — one statement, precise,
+  and cheaper than the read path's check.
+- `Job::SetReadMarker { buffer, seq, client, request, reply }`, fire-and-forget
+  like `Job::Backlog`, answering on the existing `reads_tx` as a third
+  `ReadOutcome::MarkerSet { client, request, buffer, seq, result }`. One reply
+  lane, not a fourth `mpsc` in core's select loop for one row's work; the
+  enum's doc widens from "a finished read" to "a finished job behind the flush
+  barrier". It is a write and it deliberately does not batch with ingests:
+  batching exists to amortize fsync over history at IRC's line rate, a marker
+  is human-paced and one row, and delaying it 100ms would make the Ack a lie.
+  Falling into `exec.rs`'s existing `Some(other)` arm gives the barrier for
+  free — pending ingests flush before the `UPDATE`, so the persisted marker
+  is never ahead of persisted history, which is what makes it safe to read
+  back after a crash. No new trace `eprintln`: a one-row write is not a
+  measurement, and the event and the Ack are already observable.
+- SQL in `set_read_marker` beside `ensure_buffer` in
+  `crates/havoc-core/src/storage/exec.rs` — the other `buffer`-table write,
+  and the single writer's writes belong together. exec.rs is 366/400 against
+  the longest-file ratchet: if it crosses, the split to take is
+  `storage/rows.rs` for the three non-batch row writes (`ensure_network`,
+  `ensure_buffer`, `set_read_marker`), not a cut.
+- The fate of both awaits, decided together: the directed lane's capacity
+  rises 64 -> `DIRECTED_LANE_CAPACITY = 4096`, `Bus::try_direct` and
+  `Bus::lane` are deleted, and `Bus::direct` becomes the one synchronous
+  primitive — `pub fn direct(&mut self, id, message) -> bool`, implemented
+  on `try_send`: never awaits, never blocks, never silently drops a message
+  while the lane lives. `Closed` removes the lane silently (an ordinary
+  detach). `Full` at 4096 removes it after one loud line naming the
+  `ClientId`. Why this and not the alternatives:
+  - The deadlock dies structurally, not by care: after this change no path
+    in the core loop awaits a client, so no client can stall the select
+    loop, and the storage thread's `blocking_send` on the bounded reply lanes
+    can never be held behind a reader. `search_tx`/`reads_tx` stay bounded at
+    64 — that backpressure is between storage and core, and both ends now
+    always drain.
+  - "What does half a delivered pair mean" is answered by making it
+    unrepresentable: `handle_search_outcome` becomes non-async and pushes
+    Response-then-`SearchResults` through two synchronous calls with no
+    await point between them, so the ordered pair either both lands or the
+    lane is already gone and the session is over. Search keeps its pair.
+  - The replay stops being a task: `announce` in
+    `crates/havoc-core/src/core/reads.rs` delivers inline from the core loop,
+    which deletes the second writer — and with it the zombie-vs-loud-kill
+    nondeterminism, because the map entry is once again the only aliveness
+    token and only the core loop touches it.
+  - Rejected: an unbounded lane with a depth watermark (tokio's
+    `UnboundedSender` has no `len()` — depth lives on the receiver — so the
+    watermark needs receiver-side tracking machinery, bought for zero
+    behavioral difference against `try_send` at the same threshold); a
+    per-session writer task with an overflow deque (the right answer when
+    bytes are the bound, and it is stage 4's, where clients become plural and
+    untrusted); dropping single reads at the threshold instead of the session
+    (a client that has ignored 4096 answers is broken, and dropping message
+    4097 silently leaves it broken and undiagnosed).
+  - Honest about the bound: 4096 counts messages, not bytes, and one message
+    can be a 200-row window. It is chosen to sit far above any legitimate
+    attach replay (one message per buffer; a human does not have 4096 buffers)
+    and far below hurting a laptop for `BufferInfo`-sized traffic. Byte-based
+    accounting goes to PLAN stage 4 with the socket server.
+  - A consequence worth keeping in the doc comment: because removal only
+    drops the `Sender`, a killed session still drains what is already queued
+    and then sees `Closed` — the client observes everything up to the
+    message that found the lane full, which the loud line names.
+  - Mechanical fallout: `Session.directed` keeps its exact type
+    (`mpsc::Receiver<Directed>`), so `wiring.rs` and the existing dispatch
+    tests are untouched; `EVENT_CHANNEL_CAPACITY` stays what it is (broadcast
+    lane, different concern); `run()`'s immediate-response arm and
+    `handle_read_outcome` lose their `.await`/`try_direct` split and use the
+    one primitive.
+- CLI request bookkeeping becomes one structure with one insert site and one
+  remove site: `SessionState.outstanding: HashMap<RequestId, Awaited>`
+  replaces `search_count`'s event counting and `backlog_pending`/two ad-hoc
+  counters. `request()` classifies the body itself
+  (`Awaited::from(&RequestBody)` -> `Search | Backlog | Marker | Other`), so a
+  new verb cannot forget to register; `handle_incoming` removes the id and
+  bumps the matching counter before the body match, so an `Error` still
+  ends a wait with something printed. `print_event`'s `SearchResults` arm
+  stops counting and only records `last_hits`. Consequence to check while
+  editing the script: `wait search N` now returns on the response, so hit
+  lines may print after `waited search N` — every `hit` assertion in
+  live-run.sh already sits in the post-quit phase, and the quit drain below is
+  what makes that deterministic rather than lucky. Re-verify against the
+  script as it exists now.
+- `quit` and stdin EOF drain. Both paths call one `finish()`: wait until
+  `outstanding` is empty or a deadline (`quit [secs]`, default 10) expires,
+  printing everything as usual; then a 50 ms quiet-period sweep so an event
+  queued behind its own response (a `SearchResults`, a `ReadMarkerChanged`)
+  is printed rather than discarded. A timeout is an `Err(...)` naming the
+  count, so the process exits non-zero and the harness notices — an engine
+  that did not answer is a finding, not a shrug. The 50 ms is a quiet period
+  on a queue we own, not a race hidden by a sleep, and zero would be racy
+  against the adapter task's one hop.
+- What the drain does not buy, stated where the composer will read it:
+  `Ack` means dispatch accepted it, and `ActorCommand`s issued while
+  disconnected are still dropped during the backoff sleep in
+  `crates/havoc-core/src/connection/actor.rs`. Decided: documented
+  at-most-once, made loud — the drop site's silent handling becomes one
+  `eprintln` naming the network and the command, and `ActorCommand`'s doc plus
+  `RequestBody::SendText`/`Join`'s docs state at-most-once outright. An
+  actor-side outcome was rejected because it has nowhere to go: the Ack has
+  already been sent, correlation is gone, and saying "not sent" needs a wire
+  berth — a per-request delivery outcome, which is a variant addition and
+  therefore a real v1 break (the same refusal 9a made twice), owed by stage
+  4's handshake. The deeper reason it is the right answer anyway: the echo
+  is the real confirmation. `echo-message` is in the requested caps
+  (`connection/caps.rs`), so our own PRIVMSG comes back as a `MessageAdded`
+  from the authority that matters; on a server without it, "sent" is
+  unconfirmable by anyone, which is what at-most-once means. Stage 2 gets the
+  note that the composer clears pending-send state on the echo.
+- Kind-aware counting. `msg_counts` becomes per-buffer `{ chat, total }`.
+  `wait message <name> [count] [secs]` counts privmsg and notice only —
+  what a person means by a message — and the new `wait rows <name> [count]
+  [secs]` counts every `MessageAdded` kind, which is what the store counts
+  and therefore the verb that belongs anywhere the script is reasoning about
+  seq. Script edits: carol's own drain becomes `wait message #flood 500` (her
+  join is no longer a message); A's `wait message #flood 500` now means 500
+  privmsgs rather than 499 plus a join; the post-restart re-join sync becomes
+  `wait rows #supernaut 4`, whose comment can finally say what it means — the
+  thing being awaited is a Join row. The `COUNT(*) == MAX(seq)` contiguity
+  assert in the post-mortem block is not touched: it is the
+  dedup-consumes-no-seq invariant, and `wait rows` exists so a row-level claim
+  stays expressible in the CLI beside it.
+- `mark-read <buffer> <seq>` in `crates/supernaut/src/session.rs`'s dispatch,
+  resolving the name through the same projection `send` and `backlog` use, and
+  `wait marker [count] [secs]` counting responses like `wait backlog`. The
+  `event read-marker buffer= seq=` printer already exists (prompt 5) and is
+  reused unchanged. `print_event`'s `BufferCreated` line grows
+  `last_read=<seq|->`: without it the announcement's marker is invisible to
+  the harness, which is the whole proof in session D.
+- File sizes: session.rs is 375/400 and this adds a verb, the drain, and two
+  wait targets. The `wait`/drain machinery moves to a new
+  `crates/supernaut/src/session_wait.rs` — the verbs' whole waiting-and-
+  draining story in one file, which is also where the response-counting
+  unification lives — for the same reason session_print.rs and
+  session_backlog.rs exist. Measure session.rs afterwards; the ratchet ceiling
+  stays 400 (9a declined to tighten it precisely so this prompt's file had
+  room).
+- live-run.sh, in this order. First, the anchoring, before anything else
+  moves: session D reads `backlog #supernaut after:0 50` instead of
+  `latest 5`, so no later traffic can push "the deployment failed" out of the
+  window and make an announcement failure out of a window failure. Then
+  the marker segment, after the backlog windows and before A quits:
+  `mark-read #supernaut 3` + `wait marker 1 10`, with the arithmetic written
+  above it (A join 1, B join 2, B's deployment line 3, A's re-join 4,
+  xyzzysearchtoken 5 — and the assertion is that the value round-trips, so
+  it survives a traffic change even if seq 3 stops being that line).
+  Asserted: `event read-marker buffer=[0-9]* seq=3` in a.out (broadcast state
+  observed by the process that set it), then in d.out `event buffer-created
+  .* name=#supernaut last_read=3` — a marker one process set, read back by a
+  process that never dialled anything, out of the attach announcement.
+  Then the drain's proof, which is a count, not a feature: three `^ok `
+  lines in b.out (connect, join, and the send whose Ack raced the runtime
+  drop today) and 502 in c.out (connect, join, 500 sends) — the exact
+  regression the note describes, where c.out stopped near `ok 192`. Carol's
+  echo wait stays: it proves the server saw the lines, which no Ack does.
+  And in the post-mortem sqlite3 block, beside the contiguity assert:
+  `SELECT last_read_seq FROM buffer WHERE name='#supernaut'` is 3 — the
+  marker on disk, from outside the process, as the FTS assert already does.
+- Tests. Storage: the marker writes the column and `run_list_buffers` returns
+  it; unknown buffer is an error; `seq = 0` is an error; a backward move wins
+  (set 5, set 3, read 3). Core, new
+  `crates/havoc-core/tests/core_markers.rs`: `SetReadMarker` answers `Ack` to
+  the requester and `ReadMarkerChanged` on a second session's broadcast
+  receiver (the lane is the claim under test); an unknown buffer answers
+  `Error` and emits no event. Bus: the capacity test replaces the Full-drop
+  test — fill the lane to 4096 with nobody draining, and the next `direct`
+  removes the lane once, loudly, and later calls return false; the
+  closed-lane-silent test stays. Core, in
+  `crates/havoc-core/tests/core_backlog.rs` (same subject): the 65-buffer
+  attach — seed 65 buffers, attach a bare `Session` with no pump,
+  `FetchBacklog`, and assert all 65 announcements then the correlated
+  Response arrive with the lane alive. That test is the one that fails against
+  today's code, and it is not tradeable. While in that file: its
+  `last_read_seq.is_none()` assertion and the comment "nothing writes
+  last_read_seq until prompt 9b" are now stale — 9a's own review lesson was
+  that the comment is the defect.
+- Three decision entries in BUILD-LOG.md, because each has a rejected
+  alternative argued above: the lane policy (bounded 4096 + try_send,
+  superseding the `try_direct` entry, and saying so — include the coordinator
+  amendment about UnboundedSender lacking len()); read-marker write semantics
+  (broadcast, backward allowed, no existence check, its own job behind the
+  barrier); and what "sent" means (at-most-once plus the quit drain, with the
+  echo as the real confirmation). PLAN.md gains the deferrals in the same
+  turn: stage 2 (composer renders pending-send until the echo; the
+  response-before-event ordering), stage 4 (a per-request delivery outcome
+  berth; byte-based lane accounting), stage 6 (`ReadMarkerChanged` is
+  broadcast today and becomes per-client when the schema can hold two
+  markers). All seven carry-forward notes are deleted from STAGE-1-PROMPTS.md
+  and recorded under `**Carry-forward consumed:**` as one act.
+- The diff stays inside the 800-line tripwire, and unlike 9a that is a
+  budget, not a hope: the lane rewrite is the expensive part. If it pushes
+  past, what trails into stage 2's first prompt, in this order, is (1) the
+  storage-level marker edge cases beyond unknown-buffer, and (2) `wait rows`
+  (leaving `wait message` all-kinds with its semantics documented). Never the
+  live run, never the 65-buffer test, never the capacity test.
+
+Acceptance: run scripts/live-run.sh. Watch A mark #supernaut read — `ok N`
+for the write, then `event read-marker buffer=… seq=3` arriving as broadcast
+state in the same process that asked for it. Then watch session D, which
+issues no `connect` at all, be told `event buffer-created … name=#supernaut
+last_read=3`: a read position one process set, handed to another at attach out
+of a database on disk, with `sqlite3` agreeing from outside both. In the same
+run, count the responses nobody used to get: three `ok` lines in b.out and 502
+in c.out, because quit now waits for its outstanding requests instead of
+dropping the runtime on top of them. The script exits 0 with its assertions up
+from 35. cargo test --workspace green, including the 65-buffer attach that
+deadlocks against today's code and the capacity test that replaces the
+Full-drop one; make check green with the ratchets not worsened (measure
+session.rs after the session_wait.rs split, and exec.rs).
+
+Do not: per-client markers or any reconciliation between attached clients
+(stage 6 item 1 — and the Still-open stays open: shipping the one marker the
+single nullable column can represent is not answering which of two wins);
+`draft/read-marker` propagation upstream (stage 5's upstream work, and whether
+at all is the same Still-open); any wire change — no new `RequestBody`,
+`ResponseBody`, or `Event` variant and PROTOCOL_VERSION stays 1 (unknown
+variants are not serde-tolerant, so a "not sent" signal or a batched replay is
+a real v1 break; stage 4's handshake is where additions become negotiable);
+clearing or unsetting a marker (the wire has no `Option<Seq>` berth and
+"mark unread" is a stage-2 product question); checking that the marker's seq
+exists, or clamping it to `MAX(seq)` (retention will make gaps real; a marker
+is a position, not a row reference); queueing or retrying commands dropped
+while disconnected (a resend queue is a decision about duplicates after
+reconnect — stage 5's resync seam); byte-based accounting or a per-session
+writer task for the directed lane (stage 4, where the socket makes clients
+plural and untrusted); unbounding `search_tx`/`reads_tx` (both ends always
+drain now, and that backpressure is core↔storage, not core↔client); a third
+storage trace line for the marker write (one row is not a measurement); unread
+counts, activity state, or anything rendering a marker (stage 2's buffer
+list); editing the `COUNT(*) == MAX(seq)` contiguity assert (it is the dedup
+invariant, and `wait rows` exists so the script never needs to); and new
+dependencies (nothing here needs one).
+```
 
 ---
 

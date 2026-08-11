@@ -138,10 +138,19 @@ pub enum RequestBody {
     Connect {
         network: NetworkId,
     },
+    /// **At-most-once**, like [`RequestBody::SendText`]: `Ack` is acceptance by
+    /// dispatch, not delivery. A per-request delivery outcome would be a new
+    /// variant on this wire and therefore a v1 break; stage 4's capability
+    /// handshake is where that becomes negotiable.
     Join {
         network: NetworkId,
         channel: String,
     },
+    /// **At-most-once.** `Ack` means dispatch accepted it, never that it
+    /// reached the server: a command issued while the network is reconnecting is
+    /// dropped (loudly on the engine's stderr, with no outcome on this wire —
+    /// see `Join`). The real confirmation is the echo, arriving as
+    /// [`Event::MessageAdded`] for your own line via `echo-message`.
     SendText {
         buffer: BufferId,
         text: String,
@@ -158,6 +167,10 @@ pub enum RequestBody {
     Search {
         query: String,
     },
+    /// Move a buffer's read marker. Answered with `Ack` on success plus a
+    /// broadcast [`Event::ReadMarkerChanged`]; the two travel different lanes and
+    /// are therefore **unordered** relative to each other. The marker may move
+    /// **backward** — the client is the authority on where a person has read to.
     SetReadMarker {
         buffer: BufferId,
         seq: Seq,
@@ -224,6 +237,13 @@ pub enum Event {
         request: RequestId,
         hits: Vec<Message>,
     },
+    /// Broadcast **core-owned state** (§4.5's Core column): **one marker per
+    /// buffer for the whole machine**, not per client — `buffer.last_read_seq` is
+    /// one nullable column, so the representable set was fixed by the schema, not
+    /// chosen here. It carries no `RequestId`, which is the structural tell that
+    /// it is not request-correlated, and it is the same value `BufferInfo`
+    /// already hands *every* attaching client. Per-client markers are a stage-6
+    /// schema change, not a field.
     ReadMarkerChanged {
         buffer: BufferId,
         seq: Seq,

@@ -17,6 +17,7 @@ use rusqlite::Connection;
 
 use super::identity::{parse_kind, synthetic_msgid};
 use super::query::{run_backlog, run_list_buffers, run_search};
+use super::rows::{ensure_buffer, ensure_network, set_read_marker};
 use super::{
     Ingest, IngestOutcome, Job, NetworkRow, ReadOutcome, SearchOutcome, StorageError,
     StoredMessage, buffer_kind_str, kind_code,
@@ -138,6 +139,22 @@ pub(super) fn run(conn: Connection, jobs: &mpsc::Receiver<Job>, trace: bool) {
                         let _ = reply.blocking_send(ReadOutcome::Backlog {
                             client,
                             request,
+                            result,
+                        });
+                    }
+                    Job::SetReadMarker {
+                        buffer,
+                        seq,
+                        client,
+                        request,
+                        reply,
+                    } => {
+                        let result = set_read_marker(&conn, buffer, seq);
+                        let _ = reply.blocking_send(ReadOutcome::MarkerSet {
+                            client,
+                            request,
+                            buffer,
+                            seq,
                             result,
                         });
                     }
@@ -333,34 +350,4 @@ fn ensure_buffer_cached(
     }
     state.buffers.insert(key, (BufferId(id), stored));
     Ok((BufferId(id), stored, created))
-}
-
-fn ensure_network(conn: &Connection, name: &str) -> Result<NetworkRow, StorageError> {
-    conn.execute(
-        "INSERT INTO network (name) VALUES (?1) ON CONFLICT (name) DO NOTHING",
-        [name],
-    )?;
-    let id = conn.query_row("SELECT id FROM network WHERE name = ?1", [name], |row| {
-        row.get(0)
-    })?;
-    Ok(NetworkRow(id))
-}
-
-fn ensure_buffer(
-    conn: &Connection,
-    network: NetworkRow,
-    name: &str,
-    kind: BufferKind,
-) -> Result<BufferId, StorageError> {
-    conn.execute(
-        "INSERT INTO buffer (network_id, name, kind) VALUES (?1, ?2, ?3)
-         ON CONFLICT (network_id, name) DO NOTHING",
-        (network.0, name, buffer_kind_str(kind)),
-    )?;
-    let id = conn.query_row(
-        "SELECT id FROM buffer WHERE network_id = ?1 AND name = ?2",
-        (network.0, name),
-        |row| row.get(0),
-    )?;
-    Ok(BufferId(id))
 }
