@@ -105,7 +105,18 @@ pub(crate) fn set(network_argument: &str) -> Result<(), String> {
 }
 
 fn entry(network: &str) -> Result<keyring::Entry, String> {
-    keyring::Entry::new(SERVICE, network).map_err(|error| describe(network, &error))
+    keyring::Entry::new(SERVICE, network).map_err(|error| {
+        // `Entry::new` collapses *every* store-initialization failure into a bare
+        // `NoDefaultStore`, whose own message says only that there is no store. The
+        // real cause — the D-Bus or Secret Service error on a headless Linux box, or
+        // "platform not supported" — is held by `store_status()`, which caches the
+        // one-time initialization result. Quote that instead, or the user who most
+        // needs a true sentence gets the least informative one in the program.
+        match (&error, keyring::Entry::store_status()) {
+            (keyring::Error::NoDefaultStore, Err(cause)) => describe(network, cause),
+            _ => describe(network, &error),
+        }
+    })
 }
 
 /// Three distinct sentences, because they call for three different actions, and

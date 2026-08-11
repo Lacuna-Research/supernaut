@@ -2800,3 +2800,185 @@ commit that closes it). Plus two entries on PLAN's **Still open** list, both use
 both marked *(not blocking)*: a registered account to prove SASL with, and the Libera ban
 appeal. None came from a harvest sub-agent — the post-prompt review has not run yet, and
 its findings will be dispositioned in an addendum below, as 9a, 9b and 10a did.
+
+## Prompt 10b — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 10b entry above; PR #17, second commit
+
+Appended rather than edited into that entry, for the reason 9a's, 9b's and 10a's addenda
+recorded: the entry is committed and pushed, so revising it in place trips
+`log-append-only` on the staged diff.
+
+**Review verdict:** the order was executed faithfully and the fence is fully clean — no
+second credential store of any kind, no `credential get`/`status`, no interactive prompt,
+no password-shaped key in the schema, `sasl_account` correctly absent from
+`CREDENTIAL_KEYS`, no map walk, nothing keyed by `NetworkId`, no mechanism key, the
+connect-time SASL failure policy untouched, redaction at the trace and not at `send_line`,
+no autoconnect, `PROTOCOL_VERSION` still 1, no migration, and no dependency beyond
+`keyring`. The findings were about **whether the new guarantees actually hold**, not about
+the shape of the design — and the highest one is the best kind: an assertion that passed
+for the wrong reason.
+
+**Shipped:** six fixes.
+
+(1) **The highest finding, and the assertion it fixes was provably inert:
+`scripts/live-run.sh` computed the never-in-logs base64 with the wrong SASL framing.**
+It used `printf 'alice\0alice\0%s'` — `authcid\0authcid\0password` — but SASL PLAIN is
+`authzid\0authcid\0password` and `connection/caps.rs` sends an **empty authzid**, so the
+wire carries `\0alice\0…`; caps.rs's own unit test pins `\0alice\0sesame` and the entry
+above quoted the wrong shape too. The check was therefore searching every log for a string
+the program can never emit. **Verified by breaking the redactor on purpose**, which is the
+only way to know an absence-assertion works: with `redact_outbound` returning `line`
+unchanged, the corrected check FAILs on `a.trace` and on `.cache/last-a.trace` (and the
+`<redacted>` assertion fails beside it), the run exits 1 at 43 ok. In that same leaking
+trace, `grep -cF` finds the **corrected** payload **twice** and the **old** payload
+**zero** times — so the fix is not a tidy-up, it is the difference between a live check and
+a decorative one. Redactor restored, and the line now carries a comment saying which
+framing is real and that this version was verified by breaking it.
+
+(2) **The watchdog's own FAIL line was silenced for both `security` calls.**
+`keychain_forget` wrote `with_watchdog … >/dev/null 2>&1 || true`, and that redirection
+applies to the *function*, so it swallowed the guard's `FAIL: … did not finish in 10s`
+along with `security`'s chatter — silencing precisely the line whose absence the watchdog
+exists to prevent, in the failure mode (an invisible authorization dialog) that is
+otherwise indistinguishable from a deadlock. `with_watchdog` now takes a `quiet|loud`
+argument that redirects the **inner command only**; `keychain_forget` passes `quiet`, the
+`credential set` seeding passes `loud`.
+
+(3) **`longest-file` was 399/400 with `actor.rs` at the wall, and "ratchets not worsened"
+did not hold** — 363 → 399 is a worsening even though it stayed under the ceiling, and the
+entry above recorded the number while declining the cut. The review is right that a stage
+boundary is the wrong place to hand the next prompt an unbudgeted split, so the cut named
+there was taken: `redact_outbound` and its four-case test moved to
+`crates/havoc-core/src/connection/trace.rs` (a `mod trace;` in `connection/mod.rs`, the
+helper `pub(super)`), whose module doc says both why it is its own module — the rule is
+about what a *log* may contain, not about driving a connection — and that the ratchet is
+the other reason. **Trajectory, recorded as asked: 363 → 399 → 393.** `actor.rs` is 352
+and no longer the longest file; the longest is now `crates/havoc-core/tests/config.rs` at
+393, seven lines of headroom instead of one. Still worse than 363, so the ceiling stays at
+400 rather than being tightened, and the next prompt to grow that test file splits it.
+
+(4) **`$WORK/a.pass` — a file holding the fake password — was never removed**, and under
+`KEEP_WORK` it survived, contradicting the header comment's promise that the credential
+lives in the keychain and nowhere else. `rm -f` immediately after the seeding call on both
+the success and the failure path. **Checked by running it, not by reading it:** a
+`KEEP_WORK=1` run is 46/46, `a.pass` is absent from the kept tree, and
+`grep -rlF fake-livetest-passw0rd` over that whole kept tree returns **zero files** — so
+the strong form of the claim holds, not just the narrow one.
+
+(5) **The store-unavailable error lost the platform error on exactly the platform that
+needs it.** `keyring::Entry::new` collapses every store-initialization failure into a bare
+`NoDefaultStore`, whose own message says only that there is no store — the real cause (the
+D-Bus or Secret Service error on a headless Linux box, or "platform not supported") is
+cached in `keyring::Entry::store_status()`. Verified against the 4.1.6 source rather than
+guessed: `Entry::new` returns `Err(Error::NoDefaultStore)` when `SET_CREDENTIAL_STORE_RESULT`
+is an error, and `store_status()` hands back that `&'static Result<()>`. `entry()` now
+consults it on that one variant and describes the underlying error, so the sentence the
+entry above promised a headless Linux user ("quote the platform error") is now actually the
+sentence they get.
+
+(6) **Two user-facing strings stated the PLAIN payload as `authcid\0authcid\0password`** —
+the config.rs validation comment and, worse, the refusal message a user reads — while the
+program sends `\0account\0password`. Same root cause as (1), which is the interesting part:
+one wrong mental model of the payload wrote itself into a comment, an error string, a shell
+assertion and a BUILD-LOG sentence. Both strings corrected, and the comment now names
+caps.rs's pinning test so the next reader checks rather than remembers.
+
+**Accepted as they stand, with reasons recorded rather than re-litigated:**
+
+- **The `Ambiguous` arm is unreachable on macOS.** Only the secret-service store constructs
+  it; the Apple store cannot return two matches for one service/account pair. Kept, per the
+  order, because the message is the correct thing to say if it ever fires — and recorded
+  honestly as **untested by construction on the dogfood platform**: no test exercises it
+  and none can here, so its text is reviewed prose, not verified behaviour.
+- **`credential set` trims only `\n`, so a CRLF pipe stores a trailing `\r`.** Literal
+  compliance with the order ("trims exactly one trailing newline and nothing else"), and
+  deliberately not widened: `\r` is a legal password character and guessing costs more than
+  it saves. The symptom is recorded so the next person recognises it: the password is
+  simply wrong at the server, with no local diagnostic, and the cause is invisible in a
+  confirmation line that never prints the secret.
+- **The watchdog orphans up to three `sleep 10` processes and has a narrow zombie race.**
+  Harmless in both directions — the guard finding no such pid is a no-op, and a stale guard
+  can only produce a spurious FAIL line, never mask a real failure. The one-line fix was
+  obvious while in the file, so it was taken (`pkill -P "$guard"` before killing the
+  subshell, with a comment saying a script that must never sleep should not leave sleeps
+  behind); the structure was left alone as instructed.
+- **The reviewer could not find the "ban-guard" in the diff, and was right not to.** It
+  lives in the ad-hoc acceptance script under `.cache/p10b/` (gitignored, like 10a's
+  by-hand script), not in the repository — so it protected *that run* and protects nothing
+  in the product. Said plainly rather than left to imply otherwise: **the committed
+  protection against a ban is the carry-forward note on PLAN stage 2 item 1, not a guard**,
+  and until that note is acted on the shipped client still retries a `465` forever.
+
+**Learned:** one, and it is the same lesson twice over. **An assertion about an absence is
+worthless until you have seen it fail.** Findings (1) and (4) are both "the check passed and
+the property did not hold" — a base64 string the program could never emit, and a promise
+about `KEEP_WORK` that nothing had run. Both were settled the same way, by making the bad
+state on purpose (break the redactor; run with `KEEP_WORK=1` and grep the kept tree), and
+both took under two minutes. The entry above already recorded a weaker version of this from
+10a's live run — "the new post-loop check did not fire, which is the correct outcome and not
+evidence it works; it was verified by reading" — so this is the second prompt in a row where
+a not-firing check went unexercised, and the first where doing the work found a real hole.
+**The rule that follows: a new assertion whose job is to prove something is *absent* lands
+with a recorded observation of it failing.** Not mechanized — no grep can tell a
+never-fired assertion from a correct one — so it is written here for the next
+detail-writing sub-agent, alongside 10a's disjoint-descope-list rule.
+
+**Measured after the fixes:** **476** changed lines in `crates/` against the 800 cap (was
+313 — the module split moves 60 lines and the diff counts them on both sides, plus fixes
+(5) and (6)). `cargo test --workspace`: **74 tests, all green** — unchanged, because the
+redactor's four-case test moved rather than multiplied. Ratchets: `todo-count 0`,
+**`longest-file 393`** against a ceiling of 400 (was 399, and the check's own hint to
+tighten is declined for the reason in fix (3)). New `trace.rs` is **60** lines,
+`actor.rs` is **352** (from 399), `credentials.rs` **149**,
+`crates/havoc-core/tests/config.rs` **393** — now the longest file in the tree.
+
+**Live run:** `scripts/live-run.sh` re-run **three** times after the fixes, because both the
+harness and the trace path changed. (1) With `redact_outbound` deliberately returning its
+input: **exit 1, 43 ok, 3 FAIL** — the `<redacted>` assertion and the never-in-logs check on
+both `a.trace` and `.cache/last-a.trace`, which is the evidence for finding (1) above. (2)
+Redactor restored: **46/46, exit 0**, keychain clean afterwards (`find` exit 44), no
+`a.pass` anywhere. (3) `KEEP_WORK=1`: **46/46, exit 0**, and the kept tree contains no file
+holding the fake password and no `a.pass`, with the keychain item still removed — because
+`keychain_forget` runs before the `KEEP_WORK` early return. The OFTC acceptance run was
+**not** repeated: nothing in these six fixes touches connection behaviour (the redactor
+moved modules; the rest is the harness, an error string and two comments), and a second
+connection to a public network for a no-op change is exactly the citizenship the ban taught.
+Said explicitly rather than left as a gap.
+
+**Review:** all six findings fixed, four accepted with reasons, **none rejected**. The
+review's highest finding was correct, its diagnosis exact (it named the empty authzid and
+pointed at caps.rs), and its proposed remedy sufficient — and it caught a claim the entry
+above made about its own verification that was not true, which is the finding class most
+worth having.
+
+**Carry-forward consumed:** none. All seven of 10b's notes were consumed by the first
+commit and recorded in the entry above; this commit deletes no carry-forward block.
+
+**Carry-forward raised:** **six, all adopted from the review's harvest, none rejected**, and
+one placement overruled by the coordinator. To `PLAN.md`, since 10b is stage 1's last prompt
+and no later prompt file exists to hold them: **stage 2 item 1** — a network that bans us is
+retried forever while a network that rejects our password is not, `465` unhandled in
+`connection/mod.rs`, observed live at Libera (**placed at stage 2, not the reviewer's
+suggested stage 3, by the coordinator's call: stage 3 ships nothing new by rule, and a
+dogfood month must not begin with a client that hammers networks that have said no**);
+**stage 2 item 7** — `credential set` requires `sasl_account` to exist first, which settles
+the first-run wizard's step order (config written and validated before the password is
+taken, not after); **stage 4 item 3** — the secret lives in the *login* keychain, so on
+macOS the engine must start as a launchd **Agent**, never a Daemon, or every
+`sasl_account` network gets a store-unavailable error with no config-side fix; **stage 5
+item 1** — the keyring read is a hard pre-dial failure of the whole process, so
+multi-network must write the very map loop stage 1 forbade, with per-network degradation and
+the failure surfacing as an event rather than a process exit; **stage 6 item 2** —
+`AUTHENTICATE` has no chunking and `redact_outbound` compares against `Plain.as_str()`
+alone, so a second mechanism is over-redacted and breaks live-run's assertions; **stage 6
+item 3** — the Linux keyring tree (~95 lock packages) is invisible to the allowlist check,
+which reads direct dependencies only.
+
+**A measurement the entry above asked for and could not have:** its dependency decision
+said a Linux CI runner "*would* compile the zbus half" and that this "should be measured
+before it is trusted". CI is `ubuntu-latest`, and it built and tested this PR **green in
+1m35s** — so the honest wording is now **compiled once, by a runner, unread by a human**,
+which is what the stage 6 item 3 note says. It is evidence that the Linux tree is not
+broken; it is not evidence that anyone has reviewed ~30 new crates, and the release item is
+where that distinction has to be paid.

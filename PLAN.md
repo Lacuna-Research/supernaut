@@ -230,6 +230,20 @@ Covers NORTH-STAR §8 M3.
    take that attached mode could not (§4.3).
 
    ### Carry-forward
+   - From stage 1 prompt 10b: **a network that bans us is retried forever, while a
+     network that rejects our password is not — and the ban is the one a human
+     watches.** `crates/havoc-core/src/connection/mod.rs` has no arm for `465`
+     (ERR_YOUREBANNEDCREEP), so the actor treats the closed link as an ordinary loss
+     and retries through capped backoff indefinitely. Observed live, not theorised:
+     Libera answered `465 … Your bot is not permitted to connect` during prompt 10b's
+     acceptance run, and the session kept dialling until the harness killed it.
+     Prompt 6's fail-closed reasoning for a SASL failure (report once, never retry —
+     retrying a rejected credential is how a wrong password becomes a lockout) applies
+     verbatim to a ban, and more strongly, because the retry is antisocial toward a
+     volunteer network. Handle `465` as terminal-with-reason here, and decide `464`
+     (ERR_PASSWDMISMATCH) in the same breath. Placed at stage 2 rather than stage 3
+     deliberately: stage 3 ships nothing new by rule, and a dogfood month must not
+     begin with a client that hammers networks that have said no.
    - From stage 1 prompt 10a: **autoconnect lands here, and it re-opens prompt
      9b's early-quit hazard.** 10a deliberately built none — `connect` is still an
      explicit verb in `crates/supernaut/src/session.rs`, because session D's proof
@@ -359,6 +373,16 @@ Covers NORTH-STAR §8 M3.
      and havoc-core is compiled without a TOML serializer, so it cannot. An
      explicit, user-confirmed "save this to config" action is the shape that is
      allowed, and it needs the `display` feature back plus its own decision entry.
+   - From stage 1 prompt 10b: **`credential set` requires `sasl_account` to already be
+     in the config, which settles the wizard's step order for it.**
+     `crates/supernaut/src/credentials.rs` refuses a network with no `sasl_account`
+     ("the secret stored here would never be read"), and `Config::validate` refuses
+     that key beside `plaintext = true` — so the wizard must **write and validate the
+     config first, then take the password**. It cannot collect a password and decide
+     where it belongs afterwards, which is the order a naive wizard would choose.
+     havoc-core still has no TOML serializer (the 2026-08-10 decision), so producing
+     that file is this item's own work, and it has to happen before the credential
+     step rather than after it.
    - From stage 1 prompt 10b: **there is no no-echo password prompt, and this item
      owns the terminal that would give it one.** `credential set` in
      `crates/supernaut/src/credentials.rs` reads the secret from **stdin only** and,
@@ -520,6 +544,20 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
    read markers alone (§4.5).
 
    ### Carry-forward
+   - From stage 1 prompt 10b: **the secret lives in the *login* keychain, so on macOS
+     the engine must start as a launchd **Agent**, not a **Daemon**.**
+     `crates/supernaut/src/credentials.rs` keys service `supernaut` in the User
+     keychain — keyring's macOS default, and pointing it anywhere else needs the
+     `keyring-core` route that prompt 10b's dependency decision rejected. A
+     LaunchDaemon runs in system context with no access to any user's login keychain,
+     so every network with a `sasl_account` would get the store-unavailable error and
+     there would be **no config-side fix** for it: the user cannot move the secret to
+     a place a Daemon can read. Choose the Agent, or ship the file fallback below, and
+     do it before the start-at-login story is written rather than after packaging.
+     Related, and a property of the same keying decision: one `supernaut/<network>`
+     item is shared by every `SUPERNAUT_CONFIG_DIR` on the box, so the daemon and a
+     hand-run session share credentials — convenient here, and the thing to remember
+     if profiles are ever separated.
    - From stage 1 prompt 10b: **the encrypted-file fallback for SASL secrets is
      deferred to here, and this item is its first real consumer.** NORTH-STAR §5.8
      and stage 1 item 10 both promise `keyring` *with* an encrypted-file fallback;
@@ -559,6 +597,18 @@ Covers NORTH-STAR §8 M6.
    stage 1, so this is surface, not surgery (§6.9).
 
    ### Carry-forward
+   - From stage 1 prompt 10b: **the keyring read is a hard pre-dial failure of the
+     whole process, which is exactly wrong the moment there are two networks.**
+     `run()` in `crates/supernaut/src/session.rs` propagates `credentials::load`'s
+     error with `?` before anything dials, so one network's missing keychain entry
+     refuses to start the client at all — correct for a one-network debug session
+     (fail closed, before any traffic) and indefensible for five. 10b deliberately
+     *forbade* walking the actor map for secrets, so this item has to write the very
+     loop that was banned, with per-network degradation: a missing or unavailable
+     credential degrades **that** network and leaves the rest connected. Decide where
+     that failure surfaces — an event on the network, not a process exit — before the
+     actor map gains its second live entry, because "the client will not start" is a
+     symptom a user cannot attribute to one of five networks.
    - From stage 1 prompt 10a: **three config fields were left out because a
      one-network stage cannot observe them, and this item is where each becomes
      real.** In `crates/havoc-core/src/config.rs`: (1) a **per-network nick**
@@ -625,6 +675,20 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
    "CertFP supported" promise — needs client-cert plumbing in rustls + keyring).
 
    ### Carry-forward
+   - From stage 1 prompt 10b: **`AUTHENTICATE` has no chunking, and the trace
+     redactor is chunk-safe but single-mechanism.** `begin_sasl`'s continuation in
+     `crates/havoc-core/src/connection/caps.rs` sends the whole base64 payload as one
+     line, and a payload over 400 bytes must be split across multiple `AUTHENTICATE`
+     lines by the protocol — `credential set` does not bound a secret's length, so a
+     very long password produces an oversized line today. `redact_outbound` in
+     `crates/havoc-core/src/connection/trace.rs` handles that direction safely (it
+     redacts *every* argument that is neither `+` nor a mechanism name, so chunk two
+     is redacted as well as chunk one), but it compares against
+     `SaslMechanism::Plain.as_str()` **alone** — so adding EXTERNAL over-redacts its
+     own `AUTHENTICATE EXTERNAL` line, which fails safe but silently breaks the
+     `>> AUTHENTICATE PLAIN`-shaped assertions in `scripts/live-run.sh`. Both are
+     one-line changes; they are listed here so the mechanism work budgets them
+     instead of discovering them in a trace that has stopped saying anything.
    - From stage 1 prompt 4: **the SASL "mechanism slot" is shape only —
      `begin_sasl` in `crates/havoc-core/src/connection/caps.rs` consults
      `mechanisms.first()` and failure is terminal.** EXTERNAL does not "drop in":
@@ -632,10 +696,26 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
      RPL_SASLMECHS (908) handling. Budget that machine work into the item; do not
      plan against the slot working as-is. Each choice gets a decision entry
    and its own numbered item here before any prompt exists.
+
 3. **Release.** Banner and personality (§2.1); packaging, docs, distribution; the
    retention-policy answer documented as a user promise. (The name is settled —
    Supernaut, with havoc as the headless engine; NORTH-STAR amendment 2026-08-09 —
    so no rename pass is owed here.)
+
+   ### Carry-forward
+   - From stage 1 prompt 10b: **the Linux keyring tree has been compiled exactly
+     once, in CI, and the allowlist check cannot see it at all.** `keyring = "4.1.6"`
+     added ~95 packages to `Cargo.lock` (107 → 202): `zbus` and `secret-service`, the
+     `aes`/`cbc`/`hkdf`/`sha2` crypto set the Secret Service session needs, the `num`
+     family, `async-io`'s tail. All target-gated off macOS, where only eight crates
+     build — and `scripts/check-docs.sh`'s `DEP_ALLOWLIST` reads *direct* dependencies,
+     so none of them is visible to any check. CI (`ubuntu-latest`) built PR #17 green
+     in 1m35s, so "never compiled" is now "compiled once, by a runner, unread by a
+     human": the first *supported* Linux build is still the first time ~30 of those
+     crates matter to a user. Budget it as its own step of this item, together with
+     the decision it shares with the note on stage 4 item 3: whether `secret-service`
+     or the encrypted-file fallback is the shipped Linux path. Shipping both is how a
+     platform gets two half-tested credential stories.
 
 ---
 

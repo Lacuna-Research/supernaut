@@ -217,9 +217,11 @@ impl Config {
                 // What a network *permits* as an account name is the network's
                 // business — policing it would be guessing, exactly as with
                 // channel names. What is ours is the payload we frame: SASL
-                // PLAIN sends `authcid\0authcid\0password`, so a control
-                // character splits or corrupts our own payload, and whitespace
-                // is a quoting mistake worth naming for free.
+                // PLAIN sends `authzid\0authcid\0password` and we send an empty
+                // authzid, so the wire carries `\0account\0password` (pinned by
+                // `base64_matches_rfc_vectors` in connection/caps.rs). A control
+                // character splits or corrupts our own payload, and whitespace is
+                // a quoting mistake worth naming for free.
                 if account.trim().is_empty() {
                     return Err(format!(
                         "config: network {name}: `sasl_account` must not be empty — \
@@ -230,8 +232,8 @@ impl Config {
                     return Err(format!(
                         "config: network {name}: `sasl_account` {account:?} must not contain \
                          whitespace or control characters — it is framed into the SASL PLAIN \
-                         payload `account\\0account\\0password`, which a control character \
-                         splits and a space is almost always a quoting mistake in"
+                         payload `\\0account\\0password`, which a control character splits \
+                         and a space is almost always a quoting mistake in"
                     ));
                 }
                 // Stricter than §2.3 demands, like the loopback rule below it:

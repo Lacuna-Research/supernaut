@@ -77,11 +77,20 @@ A_PID=""
 # stdin from /dev/null when job control is off, which would silently feed
 # `credential set` nothing at all.
 #
-# Usage: with_watchdog <label> <seconds> <stdin-file> <command...>
+# `quiet` is an argument rather than a redirection on the call, because
+# `with_watchdog … >/dev/null 2>&1` silences the *watchdog's own* FAIL line along
+# with the command's chatter — which is precisely the line that must survive, since
+# a stalled keychain call is invisible otherwise.
+#
+# Usage: with_watchdog <label> <seconds> <stdin-file> <quiet|loud> <command...>
 with_watchdog() {
-	local label=$1 secs=$2 stdin=$3
-	shift 3
-	"$@" <"$stdin" &
+	local label=$1 secs=$2 stdin=$3 quiet=$4
+	shift 4
+	if [ "$quiet" = quiet ]; then
+		"$@" <"$stdin" >/dev/null 2>&1 &
+	else
+		"$@" <"$stdin" &
+	fi
 	local pid=$!
 	{
 		sleep "$secs"
@@ -94,6 +103,11 @@ with_watchdog() {
 	local guard=$!
 	local status=0
 	wait "$pid" || status=$?
+	# Kill the guard's `sleep` as well as the subshell holding it: killing only the
+	# subshell leaves the sleep orphaned for up to $secs. Harmless either way (a
+	# late guard finds no such pid), but a script that must never sleep should not
+	# leave sleeps behind.
+	pkill -P "$guard" 2>/dev/null || true
 	kill "$guard" 2>/dev/null || true
 	wait "$guard" 2>/dev/null || true
 	return "$status"
@@ -105,8 +119,8 @@ with_watchdog() {
 # session A's read into a GUI prompt, i.e. a hang. After, because the harness
 # leaves no credential behind.
 keychain_forget() {
-	with_watchdog 'security delete-generic-password' 10 /dev/null \
-		security delete-generic-password -s supernaut -a liverun >/dev/null 2>&1 || true
+	with_watchdog 'security delete-generic-password' 10 /dev/null quiet \
+		security delete-generic-password -s supernaut -a liverun || true
 }
 
 cleanup() {
@@ -269,11 +283,16 @@ write_config "$WORK/config-a" alice liverun '#supernaut' alice
 keychain_forget
 printf '%s' "$FAKE_PASS" >"$WORK/a.pass"
 SUPERNAUT_CONFIG_DIR="$WORK/config-a" with_watchdog \
-	'supernaut credential set liverun' 10 "$WORK/a.pass" \
+	'supernaut credential set liverun' 10 "$WORK/a.pass" loud \
 	"$BIN" credential set liverun || {
+	rm -f "$WORK/a.pass"
 	echo "FAIL: could not store session A's SASL password in the OS keyring" >&2
 	exit 1
 }
+# Immediately, on both paths: stdin needed a file, and a file holding the fake
+# password is the one artifact KEEP_WORK must not keep — the header promises the
+# credential lives in the keychain and nowhere else.
+rm -f "$WORK/a.pass"
 
 mkfifo "$WORK/a.in"
 SUPERNAUT_CONFIG_DIR="$WORK/config-a" \
@@ -517,7 +536,13 @@ assert "$WORK/a.trace" '>> AUTHENTICATE <redacted>' 'the SASL payload was redact
 # CLAUDE.md's never-in-logs rule, made mechanical. The trace outlives $WORK (it
 # is copied to .cache/last-a.trace for the corpus harvest), so a base64 payload
 # in it would be a password persisted on disk — base64 is not redaction.
-PLAIN_PAYLOAD=$(printf 'alice\0alice\0%s' "$FAKE_PASS" | base64)
+# `\0alice\0…`, not `alice\0alice\0…`: SASL PLAIN is authzid NUL authcid NUL
+# password and `crates/havoc-core/src/connection/caps.rs` sends an *empty* authzid
+# (its own unit test pins `\0alice\0sesame`). The first version of this line used
+# the wrong framing, which made the assertion below inert — it was checking for a
+# string the program could never emit. Verified by breaking the redactor on purpose
+# and watching this fail.
+PLAIN_PAYLOAD=$(printf '\0alice\0%s' "$FAKE_PASS" | base64)
 for log in "$WORK/a.trace" "$WORK/a.out" .cache/last-a.trace; do
 	# The file must exist: `grep` on a missing path fails, which would otherwise
 	# read as "the secret is not in there" — a check that fails open, silently.
