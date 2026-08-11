@@ -1393,3 +1393,448 @@ can name a buffer before its `BufferCreated` arrives — the mirror of the exist
 ordering note), and one to PLAN stage 6 (`last_read_seq` is already a *read*-path
 value handed to every attaching client, so per-client markers change
 `run_list_buffers` too).
+
+## Decision — one directed primitive, bounded at 4096, never awaited
+
+**Date:** 2026-08-10  **Affects:** bus.rs, core.rs `run`, core/reads.rs
+(`handle_search_outcome`, `handle_read_outcome`, `announce`), `CoreHandle::attach`
+
+**Supersedes** "read answers are dropped, not awaited: `Bus::try_direct`"
+(2026-08-10, one prompt old). That entry's own *Revisit if* named this prompt, so
+this is sanctioned rather than a violation, and its asymmetry argument survives
+intact: writes are never dropped, reads are re-askable. Only the mechanism
+changes, because dropping *a read* at 64 slots was never the real bound — a
+second writer (the replay task) could park on the same lane and make the drop
+nondeterministic.
+
+**Chose:** `DIRECTED_LANE_CAPACITY = 4096` and exactly one primitive,
+`Bus::direct(&mut self, id, message) -> bool`, implemented on `try_send`:
+never awaits, never blocks, never silently drops a message while the lane lives.
+`Bus::try_direct` and `Bus::lane` are deleted. `Closed` removes the lane silently
+(an ordinary detach); `Full` removes it after one loud line naming the `ClientId`.
+Three things follow structurally rather than by care. (1) **No path in the core
+loop awaits a client**, so no client can stall the select loop and the storage
+thread's `blocking_send` on `search_tx`/`reads_tx` can never be held behind a
+wedged reader — those stay bounded at 64, because that backpressure is
+core↔storage and both ends now always drain. (2) "What does half a delivered pair
+mean" becomes unrepresentable: `handle_search_outcome` is non-async and pushes
+Response-then-`SearchResults` through two synchronous calls with no await point
+between them, so the pair either both lands or the lane is already gone and the
+session is over. (3) The attach replay stops being a task and delivers inline from
+the core loop, which deletes the second writer and with it the zombie-vs-loud-kill
+nondeterminism — the map entry is again the only aliveness token, and only the
+core loop touches it.
+
+**Over:** an unbounded lane with a `sender.len()` depth watermark at 4096 — the
+JIT writer's original proposal, and it **cannot compile**: in tokio 1.53 `len()`
+exists on `UnboundedReceiver` only, not `UnboundedSender`, and the bus holds the
+sender. Tracking depth receiver-side would buy machinery for zero behavioural
+difference against `try_send` at the same threshold, and would change
+`Session.directed`'s type (touching `wiring.rs` and every dispatch test) for it.
+Also over: a per-session writer task with an overflow deque (the right answer when
+*bytes* are the bound, which is stage 4's problem, where clients become plural and
+untrusted); dropping a single message at the threshold instead of the session (a
+client that has ignored 4096 answers is broken, and dropping message 4097 quietly
+leaves it broken and undiagnosed); and keeping two primitives (the two-writer
+nondeterminism above is what two primitives cost).
+
+**Honest about the bound:** 4096 counts *messages*, not bytes, and one message can
+be a 200-row window. It sits far above any legitimate attach replay (one message
+per buffer; a human does not have 4096 buffers) and far below hurting a laptop for
+`BufferInfo`-sized traffic. Byte-based accounting is a PLAN stage-4 note.
+
+**Revisit if:** stage 4's socket makes bytes rather than messages the bound, or
+dogfood shows a legitimate client tripping 4096.
+
+## Decision — read markers: broadcast, backward-legal, its own job behind the barrier
+
+**Date:** 2026-08-10  **Affects:** storage `Job::SetReadMarker` /
+`ReadOutcome::MarkerSet` / `rows.rs::set_read_marker`, core's `SetReadMarker` arm,
+`Event::ReadMarkerChanged`'s doc
+
+**Chose:** four things that could each have gone the other way.
+(1) **Broadcast, not directed.** §4.5 puts read markers in the Core column, the
+value is the same one `announce` already hands *every* attaching client in
+`BufferInfo.last_read_seq`, and a marker moved by one client is a marker moved for
+the machine as long as `buffer.last_read_seq` is one nullable column. It is not a
+leak, and `Bus::broadcast`'s `debug_assert` list stays `SearchResults`-only —
+`ReadMarkerChanged` carries no `RequestId`, which is the structural tell.
+(2) **A marker may move backward; last write wins, no clamp.** The client is the
+authority on where a person has read to, and scrolling back to an unread point is
+a real product action. A monotonic clamp refuses a legitimate request with no way
+to report the refusal, and "highest wins" *is* the last-write-wins reconciliation
+rule PLAN's Still-open owns — pre-deciding it inside an `UPDATE` is how that
+question gets answered by accident.
+(3) **The seq is never checked for existence and never clamped to `MAX(seq)`**; a
+marker is a position, not a row reference, and retention (stage 6) will make gaps
+real — the reasoning `Anchor::AroundSearchHit` over a vanished seq already ships
+with. `seq < 1` *is* an error, the call `limit == 0` got in 9a. Unknown buffer is
+decided by the `UPDATE`'s own `changes()`, not a preceding `EXISTS`: one
+statement, precise, and cheaper than the read path's check.
+(4) **Its own job, not a batched ingest.** Batching exists to amortize fsync over
+history at IRC's line rate; a marker is human-paced and one row, and delaying it
+100ms would make the `Ack` a lie. Falling into `exec.rs`'s `Some(other)` arm gives
+the flush barrier for free, so the persisted marker is never ahead of persisted
+history — which is what makes it safe to read back after a crash. It answers on
+the existing `reads_tx`, not a fourth `mpsc` in core's select loop for one row.
+
+**Over:** a per-client marker or any reconciliation (the wire and the schema can
+represent exactly one, so "shipping markers" means shipping the machine-wide one —
+stage 6, and the Still-open stays open); a monotonic clamp (see above); validating
+the seq against `MAX(seq)` (a false promise the moment retention lands); clearing
+a marker (no `Option<Seq>` berth on the wire, and "mark unread" is a stage-2
+product question); a directed `Ack`-only answer with no event (the marker is state,
+and state that only its setter learns about is the §4.5 bug class); a trace
+`eprintln` for the write (one row is not a measurement, and the Ack and the event
+are already observable).
+
+**Revisit if:** the schema gains a per-client marker table — at which point the
+*event's audience* changes with it, not only the write, and the variant's
+documented meaning changes too (a stage-4-handshake-gated wire change).
+
+## Decision — "sent" means at-most-once, and the drain is what quit owes
+
+**Date:** 2026-08-10  **Affects:** `ActorCommand`'s doc and the backoff drop site
+in connection/actor.rs, `RequestBody::SendText`/`Join` docs, the CLI's
+`finish()` in session_wait.rs
+
+**Chose:** documented at-most-once, made loud — plus a real drain on the client
+side, because the two failures were being confused for each other. The drop site
+in the backoff sleep gains one `eprintln` naming the network and the command;
+`ActorCommand`'s doc and `SendText`/`Join`'s wire docs state at-most-once outright.
+Separately, `quit` and stdin EOF both call one `finish()`: wait until nothing is
+outstanding or a deadline (`quit [secs]`, default 10) expires, then a 50ms
+quiet-period sweep so an event queued *behind* its own response is printed rather
+than discarded by the runtime drop. A timeout is an `Err` naming the count, so the
+process exits non-zero and the harness notices — an engine that did not answer is
+a finding, not a shrug.
+
+**Over:** an actor-side delivery *outcome*, which has nowhere to go — the `Ack` has
+already been sent and the correlation with it, so saying "not sent" needs a wire
+berth: a per-request delivery outcome, i.e. a variant addition, i.e. a real v1
+break (the same refusal 9a made twice). Also over: a resend queue (that is a
+decision about duplicates after reconnect, and it belongs to stage 5's resync
+seam); and treating the drain as a fix for the drop (it is not — the drain makes
+the client wait for answers the engine *did* send).
+
+**The deeper reason at-most-once is the right answer anyway:** the echo is the real
+confirmation. `echo-message` is in the requested caps (`connection/caps.rs`), so
+our own PRIVMSG comes back as a `MessageAdded` from the authority that matters; on
+a server without it, "sent" is unconfirmable by *anyone*, which is exactly what
+at-most-once means. Carol's live-run echo wait already relies on this and stays.
+
+**Revisit if:** stage 4's handshake makes a per-request delivery outcome
+negotiable, or stage 5's resync gives duplicates a story that makes a resend queue
+safe.
+
+## Prompt 9b — Read markers and verb hardening
+
+**Commit:** branch `prompt-09b-read-markers` (PR open)  **Date:** 2026-08-10
+
+**Shipped:** read markers set, broadcast, persisted, and handed to a process that
+never dialled anything — and the delivery-policy rewrite that was the larger half.
+Storage: `Job::SetReadMarker` behind the existing flush-before-non-ingest barrier,
+answering on the existing `reads_tx` as a third `ReadOutcome::MarkerSet`, with the
+SQL in a new `storage/rows.rs`; `seq < 1` and unknown-buffer are errors, the latter
+from the `UPDATE`'s own `changes()`; a marker may move backward. Core: the
+`SetReadMarker` arm mirrors Search/FetchBacklog including the immediate
+`Error("storage unavailable: …")` on a failed enqueue, and the stale
+`error("SetReadMarker arrives in prompt 9")` string is gone; the outcome is
+`ResponseBody::Ack` on the requester's directed lane plus a broadcast
+`Event::ReadMarkerChanged`. Bus: `DIRECTED_LANE_CAPACITY = 4096` and one
+synchronous `Bus::direct` on `try_send`, with `try_direct` and `lane` deleted;
+`handle_search_outcome` non-async so its ordered pair has no await point inside it;
+`announce` delivers inline from the core loop instead of a spawned task. CLI:
+`SessionState.outstanding: HashMap<RequestId, Awaited>` with one insert site
+(`request`, classifying the body itself) and one remove site (`handle_incoming`,
+counting before the body match), replacing `search_count` *and*
+`backlog_pending`/`backlog_count`; `mark-read <buffer> <seq>`; kind-aware
+`msg_counts { chat, total }` with `wait message` (privmsg/notice) and the new
+`wait rows` (every kind); `wait marker`; the drain `finish()` on both `quit [secs]`
+and stdin EOF; `BufferCreated`'s printer grows `last_read=<seq|->`. Doc comments on
+`ReadMarkerChanged` (broadcast core-owned state, one marker per machine, per-client
+is a stage-6 schema change) and on `SendText`/`Join`/`ActorCommand`
+(at-most-once). live-run.sh: session D re-anchored to `after:0 50` first, then the
+marker segment, then the drain's two counts and the marker on disk. No wire change:
+`PROTOCOL_VERSION` stays 1, no variant added, no `RequestBody` addition. The three
+decisions above were made in the prompt text and are recorded there too.
+
+**Deviations:** three, all mechanical, none of scope. (1) The detail predicted
+`storage/exec.rs` would cross the ratchet and named `storage/rows.rs` as the split
+to take; it did (366 → ~401 with the new arm and fn), so the split was taken as
+ordered — `ensure_network`, `ensure_buffer`, `set_read_marker` in one file, exec.rs
+at 353. (2) Two *unforeseen* splits along the same seam: `storage/mod.rs` hit 421
+with the new `Job` variant, `ReadOutcome::MarkerSet`, and the client method, so the
+channel's data vocabulary (`Ingest`, `SearchOutcome`, `BufferRow`, `ReadOutcome`,
+`IngestOutcome`, `StoredMessage`) moved to `storage/records.rs` — pure data, no SQL
+and no thread, which is a real seam and not a cut; and `storage/tests.rs` hit 403
+with the marker tests, so those moved to `storage/tests/markers.rs` exactly as
+`backlog.rs` had. (3) The `wait` arg parsing moved into session_wait.rs with the
+`wait` machinery (the detail named "the wait/drain machinery" without deciding
+where the parsing lived); `handle_incoming` moved with it, because it is the
+response-counting site the detail put in that file.
+
+**Deviation: the completion claims are held back one commit, deliberately.** The
+detail ordered the status line bumped to `10/12 complete. Next: prompt 10a.` — and
+`make check`'s blocked-prompt rule refuses exactly that, because PLAN's
+config-vs-runtime-state question carries `*(blocking: prompt 10a)*`. The gate is the
+mechanism working as designed, one commit earlier than expected: it fires on the
+commit that *names* 10a as next, not on the commit that starts it. Answering it (or
+downgrading it, which the item's own "prompt 10a ships the config file, so it settles
+here" contradicts) is a stage-10a design decision with a rejected alternative, and
+making it inside 9b to turn a check green is the worst possible reason to decide
+anything. So this commit ships the prompt's work, its detail, its consumed notes, and
+this entry, and leaves three lines for a follow-up commit on this branch, landing
+together with the decision entry that unblocks them: STAGE-1-PROMPTS.md's status
+line, its 9b outcome block, and README's badge plus table row.
+
+**Deferred:** nothing from this prompt's scope. The two tradeables the detail named
+against the line budget (storage-level marker edge cases; `wait rows`) were *not*
+traded — see **Oversize:** below for why trimming them would not have closed the
+gap.
+
+**Learned:** three things worth not relearning. (1) The oldest bug here was not the
+64 slots, it was the *second writer*: with a spawned replay task holding a lane
+clone, the map entry stopped being the only aliveness token, so whether a wedged
+client got killed loudly or lingered as a zombie depended on scheduling. Making
+delivery synchronous deleted the task and the nondeterminism together — the
+capacity number was the smaller half of the fix. (2) A 65-buffer attach is a
+genuinely cheap way to pin a lane policy: seeding 65 buffers via `ensure_buffer`
+(no ingest needed) and attaching a `Session` with no pump reproduces the exact
+client the old code deadlocked on. Verified load-bearing by temporarily setting
+`DIRECTED_LANE_CAPACITY = 64` — the test fails at the 65th announcement — then
+setting it back. (3) The Ack/event ordering claim is not theoretical: the live run
+printed `event read-marker buffer=2 seq=3` *before* `ok 16` for the request that
+caused it. Two lanes, no ordering, observed on the first run — which is why `wait
+marker` counts responses and why stage 2 gets the note.
+
+**Measured:** 40 live assertions (up from 35), 9.2s wall for the whole run.
+Longest file 363 (`tests/state_machine.rs`, untouched by this prompt); the four
+files this prompt pushed over now read exec.rs 353, storage/mod.rs 327,
+storage/tests.rs 289, session.rs 298 — session.rs *down* 77 lines despite gaining a
+verb, the drain, and two wait targets, which is what session_wait.rs (215) bought.
+The ratchet ceiling stays 400, as the detail ordered. 56 workspace tests, 6 of them
+new (3 storage markers, 2 core markers, 1 the 65-buffer attach) plus the bus
+capacity test replacing the Full-drop one. Storage trace shows 11 commits for the
+whole flood+session and three `storage backlog` lines; the marker write adds no
+trace line, deliberately.
+
+**Live run:** `scripts/live-run.sh`, **40/40 green, exit 0, on the first attempt**
+after implementation, no retries. Observed, in order: `waited backlog` for the
+centred window, then `event read-marker buffer=2 seq=3` and `ok 16` — the broadcast
+event arriving *before* its own Ack, in the process that asked. Then session D, which
+issues no `connect` at all, over A's closed data dir: `event buffer-created
+buffer=2 network=1 name=#supernaut last_read=3` straight out of the attach
+announcement (with `name=* last_read=-` and `name=#flood last_read=-` around it, so
+the marker is visibly per-buffer), and `line … text=the deployment failed` from the
+`after:0 50` window. `sqlite3` agreed from outside both processes:
+`last_read_seq=3`. The drain's counts: exactly 3 `ok` lines in b.out and exactly
+502 in c.out — the requests that used to be discarded by the runtime drop (c.out
+stopped near `ok 192` at prompt 7). Not exercised live: the loud
+dropped-while-disconnected line, because no command is issued inside a backoff
+window in this script — the path is documented and made loud, and it is honest to
+say it did not fire.
+
+**Review:** pending
+
+**Carry-forward consumed:** all seven notes on prompt 9b, deleted from
+STAGE-1-PROMPTS.md in this change. (1) *From prompt 7 — `wait message` counts every
+kind, keep the contiguity assert intact*: `msg_counts` is now `{ chat, total }`,
+`wait message` counts privmsg/notice and the new `wait rows` counts every kind, so
+a row-level claim stays expressible in the CLI; the `COUNT(*) == MAX(seq)` assert
+was not touched, and `wait rows` exists so the script never needs to. (2) *From
+prompt 7 — quit races in-flight requests*: `finish()`, on both `quit` and stdin
+EOF, with a hard `Err` on timeout; proved by asserting 3 responses in b.out and 502
+in c.out rather than by claiming a feature. (3) *From prompt 6 — commands issued
+while disconnected vanish with no signal*: decided as documented at-most-once, made
+loud at the drop site and stated on `ActorCommand`, `SendText`, and `Join`, with the
+echo named as the real confirmation (decision entry above); an actor-side outcome
+was rejected for having nowhere to go, and the composer's half of it is a stage-2
+note. (4) *From prompt 9a — the replay task and `try_direct` fight over one lane,
+and search still awaits it*: both awaits decided together — one synchronous
+`Bus::direct` at 4096, the replay inline, `handle_search_outcome` non-async — with
+the 65-buffer attach as the ordered test, which fails against the pre-9b engine.
+(5) *From prompt 9a — two counting patterns in one struct*: `outstanding` +
+`Awaited` replaced both, `search_count` is gone, and the counter still runs before
+the body match so an `Error` ends a wait. (6) *From prompt 9a — session D's window
+is fragile to new #supernaut traffic*: re-anchored to `after:0 50` **first**, before
+any verb semantics moved, exactly as ordered. (7) *From prompt 9a — the stale
+"SetReadMarker arrives in prompt 9" string*: died with the arm.
+
+**Carry-forward raised:** see Review.
+
+**Oversize:** 1454 changed lines in crates/ against the 800 cap. Measured against
+the remedies the detail named rather than waved through, and they do not close the
+gap: of that total, 437 lines are tests (core_markers.rs 187, the 65-buffer attach
+70, the storage marker tests 118, the bus capacity test ~62) and ~214 are pure
+*moves* counted twice by numstat (storage/records.rs, storage/rows.rs,
+storage/tests/markers.rs, session_wait.rs — every one of them forced by the
+longest-file ratchet and taken along a named seam). Net of the moves the change is
+~1240, and the two tradeables the detail listed are the storage marker edge cases
+(~118) and `wait rows` (~25): dropping both lands at ~1100, still well over, while
+deleting verified tests to buy 143 lines is a worse trade than saying so here. The
+reason the number is what it is, plainly: this prompt's markers are small (the arm,
+the job, one `UPDATE`, one verb) and its *other* half was a delivery-policy rewrite
+touching every path prompts 5–9a shipped — which is what the 9a/9b split budgeted
+for and spent here deliberately. Examined for a further split and left whole: the
+lane rewrite and the marker cannot be separated, because the marker's Ack-plus-event
+pair is the thing that made "what does half a delivered pair mean" have to be
+answered, and the 65-buffer test proves the policy the marker rides on. Never a
+candidate for trimming: the live run, the 65-buffer attach, the capacity test.
+
+## Decision — config vs. runtime state: the database owns runtime state, config is seed-only
+
+**Date:** 2026-08-10  **Affects:** prompt 10a's whole surface (the TOML schema),
+and PLAN's **Still open** list, from which this item is deleted by this entry
+
+**Chose:** the config file is **read-only seed data** — networks, nick, autojoin —
+applied at startup; everything the program learns, or the user does at runtime
+(joined channels, the buffer set, read markers) lives in the database. **The program
+never writes the config file, ever.** "I joined this channel manually" is database
+state, which the buffer row ingestion already creates; config's `autojoin` list is
+the *seed*, not the record.
+**Over:** config as the mutable source of truth — the program rewriting the user's
+TOML clobbers their comments and formatting, races their own edits, and makes
+"config paths are public API" a lie; and two-way sync, which has both problems plus
+a reconciliation story nobody asked for.
+**Because:** NORTH-STAR §9's stated leaning (database, config as seed only), and the
+same principle already in force elsewhere — the program never writes to its own
+source tree, and the config file is likewise the *user's* document.
+**Revisit if:** dogfood (stage 3) shows users expecting manual joins to become
+autojoin entries — and the answer then would be an explicit "save to config" action,
+never a silent rewrite.
+
+**This unblocks prompt 10a**, whose own text said the question settles there; the
+gate fired one commit earlier than that, on 9b's status bump, which is what forced
+the decision now (see the 9b entry's deviation on the held-back completion claims).
+**Verified while here, as the item's own text required:** no earlier prompt persists
+join *intent* anywhere this answer would have to migrate. The only join-shaped rows
+on disk are `message` rows of kind `join` (observed history, written by the ingest
+classifier) and `buffer` rows (a buffer exists because traffic was seen for it);
+autojoin lives only in `connection::Config.autojoin`, in memory, passed per actor
+spawn. Both are consistent with the answer: history is a record of what happened,
+not a declaration of what should happen at next startup.
+
+## Prompt 9b — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 9b entry above; PR #15, second commit
+
+Appended rather than edited into that entry, deliberately, for the reason prompt 9a's
+addendum recorded: the entry is committed and pushed, so revising it in place trips
+`log-append-only` on the staged diff.
+
+**Shipped:** seven fixes from the review.
+
+(1) **The highest finding, and it was a real one: the 65-buffer attach test did not
+pin the deadlock — it passed against prompt 9a's engine.** The shape drained all 65
+announcements *before* asking for a window, so the old spawned replay task made
+progress and `try_direct` never saw a full lane. The reviewer's proposed shape (ask
+immediately, nothing drained, sleep, then drain and assert the correlated Response
+arrived at all) was applied — **and still passed on main**, because with nothing
+ordering the two answers the outcome is a coin flip between the replay task filling
+the lane and the window's answer arriving first. That coin flip *is* the
+nondeterminism this prompt's lane decision describes, so a test that depends on it
+proves nothing. The shape that is deterministic adds one wait between attach and the
+fetch, so the replay has demonstrably landed (pre-9b: filled the 64-slot lane and
+parked its task on the 65th) before the window is asked for. **Verified both ways, 5
+runs each: 5/5 FAILED against `origin/main`** with the exact loud line
+`client 1 is not draining its directed lane; dropping it and this read`, **5/5 pass
+on HEAD.** The test's doc comment now records both wrong shapes and why each was
+wrong, because the next person to "simplify" it will reach for one of them.
+
+(2) **A secrets leak in a line this prompt added.** The dropped-while-disconnected
+`eprintln` printed `{command:?}`, and `ActorCommand::Privmsg` carries the text — so a
+NickServ `IDENTIFY` issued during backoff would have put a password on stderr,
+against CLAUDE.md's rule, which governs logs exactly as much as config. Fixed with a
+`describe(&ActorCommand)` helper printing variant and target only (`Privmsg to
+#chan`, `Join #chan`); the line stays **ungated and loud**, only the body goes, and
+`ActorCommand`'s doc now says so. Worth naming the shape of the mistake: the leak
+arrived *with* the fix for silence — making a drop loud and making it safe are two
+jobs, and `{:?}` on a domain type is where the second one gets skipped.
+
+(3) `quit abc` silently meant `quit 10`. Now an error line naming the argument, and
+the session stays alive — a swallowed typo would quietly restore the exact race the
+drain exists to close.
+
+(4) Two over-broad doc claims tightened. bus.rs said no `blocking_send` can be parked
+behind "a wedged reader"; the true claim is *behind a client* — the core loop can
+still park on the storage thread, because `connect` awaits a
+`spawn_blocking(ensure_network)` round trip and the bounded reply lanes are drained
+only by that same loop. The doc now scopes itself and points at the stage-4 note.
+`announce`'s idempotence contract ("a duplicate is legal, a missing one is not") now
+says what it is conditional on: it holds while the lane is live; under `Full` the
+client is dead by policy and the replay is abandoned with it.
+
+(5) live-run.sh's `around-hit` line gained the comment its correctness depends on:
+`last_hits` is filled by the SearchResults *event* while `wait search` now returns on
+the *response*, which is safe **only** because both ride the same directed lane in
+order. Filed as a stage-2 carry-forward too, so the invariant is not documented in
+only one place.
+
+(6) **Finding (b), the untested failure path: fixed rather than deferred.** `crates/
+supernaut` had zero tests, and `finish()` returning `Ok` on timeout would have let
+the whole 40-assertion acceptance suite pass while `quit` silently discarded in-flight
+requests — invisible from outside, because the assertions count printed responses, not
+the exit code. It unit-tests cleanly with a fabricated `SessionState` (a dangling
+`RequestId`, an `incoming` channel held open so the lane is pending rather than
+closed) and deadline 0, which keeps it instant without a paused-clock runtime and
+takes the identical code path a real 10s timeout takes. No restructuring was needed,
+so the rejected-because is moot. First test in the binary crate.
+
+(7) STAGE-1-PROMPTS.md's 9b section gained the `**Status:** complete.` outcome
+paragraph every other completed prompt has.
+
+**Accepted as they stand, with the reasoning recorded rather than re-litigated:**
+the oversize disposition (1469 vs 800 — the review confirmed neither descope-ladder
+item would have closed the gap; they total 143 lines, so the justification in the
+entry above stands); `storage/rows.rs` taken unconditionally although exec.rs would
+have landed at ~383 rather than over 400 (the split's *shape* was the one the detail
+ordered, and its cost was paid against a budget already blown — reversing it now
+would churn a file for a line count that is no longer the binding constraint);
+`storage/records.rs` as a second unforeseen ratchet-forced split (a pure move along a
+real seam); and `wait search`'s reorder consequence, which the review verified safe
+via the same-lane invariant now written into the script.
+
+**Rejected, with the reason:** the proposed note that `Awaited::from`'s exhaustive
+match makes a future wire change a two-file edit. No remaining stage-1 prompt may add
+a wire variant — each one's fence forbids it and `PROTOCOL_VERSION` is frozen until
+stage 4's handshake — so the note changes nothing about how 10a or 10b execute, and
+the exhaustive match is already its own compile-time enforcement. A note whose only
+effect is to be read and agreed with is noise in a file the next session must read
+front to back.
+
+**Learned:** the useful lesson is (1), and it generalizes past this test. **A
+regression test written from the fix rather than against the bug will pass on the
+buggy code**, and nothing in a green suite says which kind it is. The only way to
+know was to check out the parent commit, copy the test onto it, and run it — cheap
+(one `git worktree add --detach origin/main`), and it turned a test that proved
+nothing into the one that pins the lane policy. It also caught the second-order
+version of the same error: a shape that fails on main *sometimes* is not a
+regression test either, and "sometimes" is exactly what a concurrency fix's test
+looks like when it is still racing. Corollary worth keeping: when the bug being fixed
+*is* a nondeterminism, the test has to remove the nondeterminism to observe it —
+hence the wait, which is not a sleep-instead-of-a-sync but the ordering the assertion
+is about.
+
+**Live run:** `scripts/live-run.sh` re-run after these fixes, because actor.rs and
+session.rs are both on live paths: **40/40, exit 0** — the third green run of this
+prompt. `quit` with no argument still drains (b.out 3 `ok` lines, c.out 502), and the
+marker round-trip is unchanged (`event read-marker buffer=2 seq=3` in a.out,
+`last_read=3` in d.out and in `sqlite3`).
+
+**Review:** the review's findings are all dispositioned above — two code fixes
+(the non-load-bearing test, the secrets leak), five smaller fixes, four liberties
+accepted with reasons, one note rejected with a reason. Its highest finding was
+correct and its proposed remedy was insufficient, which is recorded above rather
+than smoothed over.
+
+**Carry-forward raised:** eight notes landed, one rejected. Two to prompt 10a (`quit`
+now blocking and exiting non-zero, which a config-seeded autoconnect can trip; `wait
+message` no longer counting the Join rows autojoin produces, so 10a must use `wait
+rows`). Four to PLAN stage 4 item 1 (the replay is now the burst most likely to trip
+the lane cap, so a per-session writer must serve it first; `Full` and `Closed` are
+indistinguishable at the client, so the frame protocol owes the distinction; the core
+loop can still park on the storage thread and `reads_tx` now has three producers; and
+the existing byte-accounting note). One to PLAN stage 2 item 1 (`around-hit`'s
+same-lane dependency). One rejected (the `Awaited::from` note, above). The
+config-vs-runtime-state answer is its own decision entry above, not a note.

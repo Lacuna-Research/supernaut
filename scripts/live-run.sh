@@ -211,10 +211,12 @@ FLOOD_START=$(date +%s)
 {
 	printf 'connect\nwait registered 10\njoin #flood\nwait buffer #flood 10\n'
 	seq 1 500 | awk '{ print "send #flood flood line " $1 }'
-	# Drain before quit: carol counts her own 500 echo-message copies (+1 for
-	# her join) — without this, quit races ~300 in-flight requests and the
-	# runtime drop discards them (observed: c.out stopped at ok 192).
-	printf 'wait message #flood 501 120\nquit\n'
+	# Carol counts her own 500 echo-message copies — `wait message` is
+	# privmsg/notice only now, so her join no longer inflates the number. The
+	# echo wait stays because it proves the *server* saw the lines, which no Ack
+	# does; `quit` now additionally drains her outstanding requests (before
+	# prompt 9b the runtime drop discarded them and c.out stopped near ok 192).
+	printf 'wait message #flood 500 120\nquit\n'
 } | "$BIN" session --host localhost --port "$TLS_PORT" --nick carol \
 	--tls-ca "$WORK/fullchain.pem" --data-dir "$WORK/data-c" >"$WORK/c.out" 2>&1
 printf 'wait message #flood 500 60\n' >&3 || true
@@ -236,12 +238,13 @@ for _ in $(seq 1 150); do
 	[ "$(grep -c 'waited registered' "$WORK/a.out")" -ge 2 ] && break
 	sleep 0.2
 done
-# A's joins were verbs, not autojoin config: re-join after the restart, and
-# sync on the Join row's own MessageAdded (#supernaut count: A join, B join,
-# B privmsg, then this re-join = 4).
-printf 'join #supernaut\nwait message #supernaut 4 10\n' >&3 || true
+# A's joins were verbs, not autojoin config: re-join after the restart, and sync
+# on the Join row's own MessageAdded. `wait rows` counts every MessageAdded kind
+# — what the *store* counts — so this says what it means: the thing being awaited
+# IS a Join row (#supernaut rows: A join, B join, B privmsg, this re-join = 4).
+printf 'join #supernaut\nwait rows #supernaut 4 10\n' >&3 || true
 for _ in $(seq 1 50); do
-	[ "$(grep -c 'waited message #supernaut' "$WORK/a.out")" -ge 2 ] && break
+	grep -q 'waited rows #supernaut' "$WORK/a.out" && break
 	sleep 0.2
 done
 # --- Search (prompt 8): by now the corpus spans two channels and a restart.
@@ -293,13 +296,29 @@ for _ in $(seq 1 100); do
 	sleep 0.2
 done
 # Jump-to-context, headless: the anchor is the newest #flood search hit above
-# ("flood line 250"), not a seq this script pasted in.
+# ("flood line 250"), not a seq this script pasted in. Note the coupling this
+# depends on: `last_hits` is filled by the SearchResults *event*, while `wait
+# search` now returns on the *response*. It is safe only because search's Response
+# and its correlated Event ride the same directed lane, in that order — if
+# SearchResults ever moves lanes, this line races its own data.
 printf 'backlog #flood around-hit 7\nwait backlog 3 10\n' >&3 || true
 for _ in $(seq 1 50); do
 	[ "$(grep -c 'waited backlog' "$WORK/a.out")" -ge 3 ] && break
 	sleep 0.2
 done
 BACKLOG_SECS=$(($(date +%s) - BACKLOG_START))
+
+# --- Read markers (prompt 9b). The arithmetic, so a later traffic change is
+# diagnosable rather than mysterious: #supernaut's rows are A's join (1), B's
+# join (2), B's "the deployment failed" (3), A's re-join after the restart (4),
+# and xyzzysearchtoken (5). The assertions below are that the *value* 3 round
+# trips — through the broadcast event here, and through session D's attach
+# announcement and sqlite3 later — so they survive seq 3 ceasing to be that line.
+printf 'mark-read #supernaut 3\nwait marker 1 10\n' >&3 || true
+for _ in $(seq 1 50); do
+	grep -q 'waited marker' "$WORK/a.out" && break
+	sleep 0.2
+done
 
 printf 'quit\n' >&3 || true
 exec 3>&-
@@ -317,7 +336,10 @@ cp "$WORK/a.trace" .cache/last-a.trace
 # prompt 10a's config file deletes. Two live processes over one file is
 # deliberately not attempted — cached per-buffer seq counters in two writers
 # would race the write path, and stage 4's daemon makes one writer structural.
-printf 'wait buffer #supernaut 10\nbacklog #supernaut latest 5\nwait backlog 1 10\nquit\n' |
+# D reads `after:0` rather than `latest 5`: anchored at the start of history, so
+# traffic added to #supernaut before A quits can never push "the deployment
+# failed" out of the window and turn a window failure into an announcement one.
+printf 'wait buffer #supernaut 10\nbacklog #supernaut after:0 50\nwait backlog 1 10\nquit\n' |
 	"$BIN" session --host localhost --port "$TLS_PORT" --nick dave \
 		--tls-ca "$WORK/fullchain.pem" --data-dir "$WORK/data-a" >"$WORK/d.out" 2>&1
 
@@ -394,15 +416,39 @@ assert "$WORK/a.out" 'line .*text=flood line 247' 'around-hit carried three line
 assert "$WORK/a.out" 'line .*text=flood line 253' 'around-hit carried three lines after the hit'
 printf 'ok    backlog wall time %ss for three windows incl. the 200-row cap (recorded, not asserted)\n' "$BACKLOG_SECS"
 
+# --- Read markers (prompt 9b): a marker A set, observed by A as broadcast state.
+assert "$WORK/a.out" 'event read-marker buffer=[0-9]* seq=3' \
+	'A saw its own read marker come back as broadcast core state'
+
 # --- The announcement proof: session D never touched the network.
 assert "$WORK/d.out" 'event buffer-created .* name=#supernaut' 'D was told about a buffer it never saw created'
 assert "$WORK/d.out" 'waited buffer #supernaut' 'D resolved #supernaut from the attach replay alone'
 assert "$WORK/d.out" 'line .*text=the deployment failed' "D read another process's history out of a window"
+assert "$WORK/d.out" 'event buffer-created .* name=#supernaut last_read=3' \
+	"D was told another process's read marker, out of the attach announcement"
 if grep -q 'event connection-state' "$WORK/d.out"; then
 	printf 'FAIL  %s\n' 'D never dialled anything' >&2
 	fail=1
 else
 	printf 'ok    %s\n' 'D never dialled anything (no connection-state line in its output)'
+fi
+
+# --- The quit drain (prompt 9b), proved by counting the responses nobody used to
+# get: B's three (connect, join, and the send whose Ack raced the runtime drop)
+# and carol's 502 (connect, join, 500 sends).
+B_OKS=$(grep -c '^ok ' "$WORK/b.out" || true)
+if [ "$B_OKS" -eq 3 ]; then
+	printf 'ok    %s\n' 'quit drained B: all three responses printed'
+else
+	printf 'FAIL  %s (saw %s of 3)\n' 'quit drained B: all three responses printed' "$B_OKS" >&2
+	fail=1
+fi
+C_OKS=$(grep -c '^ok ' "$WORK/c.out" || true)
+if [ "$C_OKS" -eq 502 ]; then
+	printf 'ok    %s\n' "quit drained carol's flood: all 502 responses printed"
+else
+	printf 'FAIL  %s (saw %s of 502)\n' "quit drained carol's flood: all 502 responses printed" "$C_OKS" >&2
+	fail=1
 fi
 
 # Post-mortem, from outside the process: WAL held, seq contiguous, no dupes.
@@ -414,6 +460,13 @@ MAXSEQ=$(sqlite3 "$DB" "SELECT MAX(seq) FROM message WHERE buffer_id = $FLOOD_BU
 ALLROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM message WHERE buffer_id = $FLOOD_BUF")
 DISTINCT=$(sqlite3 "$DB" "SELECT COUNT(DISTINCT text) FROM message WHERE buffer_id = $FLOOD_BUF AND kind = 0")
 FTS_ROWS=$(sqlite3 "$DB" "SELECT COUNT(*) FROM message_fts WHERE message_fts MATCH 'flood'")
+MARKER=$(sqlite3 "$DB" "SELECT last_read_seq FROM buffer WHERE name = '#supernaut'")
+if [ "$MARKER" = 3 ]; then
+	printf 'ok    %s (last_read_seq=%s)\n' 'the read marker is on disk' "$MARKER"
+else
+	printf 'FAIL  %s (last_read_seq=%s)\n' 'the read marker is on disk' "$MARKER" >&2
+	fail=1
+fi
 if [ "$JOURNAL" = wal ] && [ "$ROWS" -eq 500 ] && [ "$DISTINCT" -eq 500 ] && [ "$ALLROWS" -eq "$MAXSEQ" ]; then
 	printf 'ok    %s (journal=%s rows=%s distinct=%s seq contiguous at %s)\n' 'history survived on disk' "$JOURNAL" "$ROWS" "$DISTINCT" "$MAXSEQ"
 	if [ "$FTS_ROWS" -ge 500 ]; then

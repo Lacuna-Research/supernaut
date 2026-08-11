@@ -1,9 +1,8 @@
 //! The debug CLI's `backlog` verb: anchor parsing and window printing — split
 //! from session.rs for the size ratchet, exactly as session_print.rs was.
 //!
-//! `wait backlog` counts **responses**, not events: a window that fails comes
-//! back as an `Error` on the same `RequestId`, so the wait ends with a printed
-//! error instead of a timeout with nothing to read.
+//! `wait backlog` counts **responses**, not events — the pattern every wait
+//! target now shares; the bookkeeping lives in session_wait.rs.
 
 use havoc_ipc::{Anchor, BufferId, Message, RequestBody, RequestId, Seq};
 
@@ -33,7 +32,9 @@ pub(crate) async fn request_backlog(
             return Ok(());
         }
     };
-    let id = request(
+    // `request` records the id and its class, so *either* answer ends a
+    // `wait backlog`.
+    request(
         state,
         RequestBody::FetchBacklog {
             buffer,
@@ -42,8 +43,6 @@ pub(crate) async fn request_backlog(
         },
     )
     .await?;
-    // Recorded at request time so that *either* answer ends a `wait backlog`.
-    state.backlog_pending.insert(id);
     Ok(())
 }
 

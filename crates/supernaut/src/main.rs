@@ -4,6 +4,7 @@
 mod session;
 mod session_backlog;
 mod session_print;
+mod session_wait;
 mod wiring;
 
 use std::path::PathBuf;

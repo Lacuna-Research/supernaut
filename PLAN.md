@@ -80,15 +80,13 @@ documentation example must not block a real prompt.) `make check` refuses to let
 blocked prompt become the next one. Downgrading blocking → not blocking is a decision,
 and gets a decision entry.
 
-- **Config vs. runtime state.** *(blocking: prompt 10a)* Where does "I joined this
-  channel manually" live — config file or database? (NORTH-STAR §9: leaning database,
-  config as seed only.) Prompt 10a ships the config file, so it settles here. Until
-  then, earlier prompts must not persist join state anywhere the answer would have to
-  migrate; if one does, name the symbol on this item.
 - **Read marker reconciliation across attached clients.** *(not blocking)* Last-write-
   wins on timestamp is probably fine; also decide whether to propagate upstream via
-  IRCv3 `draft/read-marker` (NORTH-STAR §9). Single-client markers ship in prompt 9
-  without choosing; this must be settled before stage 6 item 1 (multi-client attach).
+  IRCv3 `draft/read-marker` (NORTH-STAR §9). Prompt 9b ships the one marker the single
+  nullable column can represent — machine-wide, broadcast, last-write-wins with no
+  clamp — which is deliberately *not* an answer to which of two clients wins; that
+  needs a schema and a wire that can hold two markers. Settle before stage 6 item 1
+  (multi-client attach).
 - **Retention policy.** *(not blocking)* Default "never delete", but a vacuum/archive
   story is owed (NORTH-STAR §9). Nothing in the schema forecloses it. Settle by stage 6
   item 3 (release), where it becomes a documented user promise.
@@ -177,6 +175,8 @@ genuinely is.
    *announces* the buffer set to each attaching client (a replay of
    `BufferCreated` on that session's lane), so a client over a data dir an
    earlier process wrote can resolve buffers no event of its own introduced.
+   Prompt 9b's marker is machine-wide and broadcast (one nullable column), and it
+   may move backward — the client is the authority on where a person has read to.
 10. **Network config and credentials.** TOML config for networks/nick/autojoin as seed
     data; `keyring` with encrypted-file fallback for SASL secrets — never plaintext in
     the config file (§5.8). Ends with the stage acceptance run driven from config
@@ -209,6 +209,17 @@ Covers NORTH-STAR §8 M3.
      lanes via select! with no ordering between an Ack and the event it caused.
      The TUI's projection must dedupe phase transitions and never assume
      response-before-event.
+   - From stage 1 prompt 9b: **`around-hit`, and anything shaped like it, depends
+     on search's Response and its correlated Event riding the same directed lane in
+     order.** `wait search` counts *responses* while `last_hits` is filled by the
+     *event*; the invariant holds only because both travel one lane. If
+     `SearchResults` ever moves lanes, every response-counted wait races its own
+     data — live-run.sh carries the same warning above its `around-hit` line.
+   - From stage 1 prompt 9b: **a `SetReadMarker` `Ack` and its
+     `ReadMarkerChanged` are unordered relative to each other** — the Ack rides
+     the directed lane, the event the broadcast lane, and the live run has been
+     observed printing the event *first*. The projection must not treat the Ack as
+     the marker's arrival, nor the event as confirmation of its own request.
    - From stage 1 prompt 9a: **`BufferCreated` can arrive AFTER a `Backlog`
      response naming the same buffer.** Announcements go out on a spawned task
      (`announce` in `crates/havoc-core/src/core/reads.rs`) while responses go out
@@ -235,6 +246,14 @@ Covers NORTH-STAR §8 M3.
    nick completion.
 
    ### Carry-forward
+   - From stage 1 prompt 9b: **`SendText`/`Join` are documented at-most-once, so
+     the composer must clear pending-send state on the *echo*, not the `Ack`.**
+     A command issued while the network is reconnecting is dropped in
+     `crates/havoc-core/src/connection/actor.rs` (loudly on stderr, with no
+     outcome on the wire — a per-request delivery outcome is stage 4's). Our own
+     PRIVMSG returns as a `MessageAdded` because `echo-message` is requested, and
+     that is the only confirmation that exists; on a server without it, "sent" is
+     unconfirmable by anyone.
    - From stage 1 prompt 8: **bare hyphenated search terms are FTS5 column-
      filter syntax** (`xyzzy-quicksilver` → "no such column") — the error
      returns cleanly, but the `/search` UX here should quote bare terms
@@ -289,14 +308,45 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
      transport-local by design. The UDS server must perform the same merge
      core-side and give lag/close a frame representation — otherwise the
      loud-lag guarantee silently fails to cross the socket.
-   - From stage 1 prompt 9a: **`FetchBacklog` no longer has an
-     exactly-one-Response guarantee, and nothing on the wire says so.** Read
-     responses ride `Bus::try_direct`, which drops the answer and removes the
-     lane on a full queue, recorded only by an engine-stderr `eprintln`.
+   - From stage 1 prompts 9a and 9b: **no response has an exactly-one-Response
+     guarantee once a lane fills, and nothing on the wire says so.** Every
+     directed message now rides `Bus::direct`
+     (`crates/havoc-core/src/bus.rs`), which removes the whole session at
+     `DIRECTED_LANE_CAPACITY`, recorded only by an engine-stderr `eprintln`.
      Embedded mode masks this behind `wiring.rs`'s 256-deep pump; a socket writer
-     will not. The frame protocol needs either a dropped-read signal or a
-     documented at-most-once rule for read responses — decided alongside the
+     will not. The frame protocol needs either a dropped-message signal or a
+     documented at-most-once rule for responses — decided alongside the
      Lagged/Closed frame representation the note above already owes.
+   - From stage 1 prompt 9b: **the attach replay is now inline and unbuffered — a
+     client with >4096 buffers is killed at attach rather than served slowly.**
+     `announce` in `crates/havoc-core/src/core/reads.rs` loops `bus.direct` with no
+     backpressure path, and the replay is the one burst whose size the *engine*
+     chooses — so it is now the burst most likely to trip
+     `DIRECTED_LANE_CAPACITY`. A per-session writer task must handle the replay
+     first, before ordinary traffic.
+   - From stage 1 prompt 9b: **`Full` and `Closed` are indistinguishable at the
+     client — both look like a closed transport.** The dropped-for-not-reading
+     reason lives only in engine stderr naming the `ClientId`. The frame protocol
+     needs the distinction if a client is ever to log "you were dropped" rather
+     than "the server went away" (extends the dropped-message note above).
+   - From stage 1 prompt 9b: **the core loop can still park on the storage thread,
+     and `reads_tx` now has three producers.** `connect()` in
+     `crates/havoc-core/src/core.rs` awaits a `spawn_blocking(ensure_network)`
+     round trip to the thread whose bounded (64) reply lanes only the core loop
+     drains, and `SetReadMarker`/`Backlog`/`ListBuffers` all answer on `reads_tx`.
+     Untrusted pipelining clients make a deep `reads_tx` reachable; decide with the
+     socket server whether `connect` stops being a blocking round trip.
+   - From stage 1 prompt 9b: **`DIRECTED_LANE_CAPACITY` counts messages, not
+     bytes, and one message can be a 200-row window.** 4096 was chosen to sit far
+     above any legitimate attach replay and far below hurting a laptop; byte-based
+     accounting (and, if bytes are the bound, a per-session writer task with an
+     overflow deque instead of a bounded channel) belongs here, where the socket
+     makes clients plural and untrusted.
+   - From stage 1 prompt 9b: **"sent" has no berth, so `SendText`/`Join` are
+     at-most-once.** A command dropped while disconnected cannot be reported: the
+     `Ack` has already gone out and the correlation with it, and a per-request
+     delivery outcome is a *variant* addition — a real v1 break. This handshake is
+     where variant additions become negotiable, so it owes the berth.
    - From stage 1 prompt 9a: **the announcement's unconfigured-network skip is
      advisory, not a boundary.** `FetchBacklog` in
      `crates/havoc-core/src/core.rs` is not gated on `state.buffers`, so a client
@@ -370,6 +420,13 @@ NORTH-STAR §8 M7+ is a menu, not a commitment (§7); this stage picks from it a
      (`crates/havoc-core/migrations/0001_init.sql`). Per-client markers owe a
      migration to a per-client table; make the reconciliation decision knowing the
      current shape can only represent the merged result, never per-client inputs.
+   - From stage 1 prompt 9b: **`Event::ReadMarkerChanged` is broadcast to every
+     attached client today, and that is not a leak — it is the honest shape of one
+     nullable column.** Making markers per-client changes the *event's* audience
+     as well as the schema: it becomes directed, which means the variant's
+     documented meaning ("core-owned state, one marker per buffer for the whole
+     machine") changes with it. A wire that can carry a client-scoped marker is a
+     variant or field addition, so it is gated on stage 4's handshake.
    - From stage 1 prompt 9a: **the read path already hands `last_read_seq` to
      every attaching client, one value per buffer.** `run_list_buffers`
      (`crates/havoc-core/src/storage/query.rs`) selects it into `BufferRow` and

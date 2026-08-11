@@ -13,13 +13,34 @@ use tokio::sync::mpsc;
 use super::io::{AnyLineTransport, LineTransport, Security};
 use super::{Config, Machine, State, ingest};
 
-/// Commands the core sends its actor. Dropped while disconnected: autojoin
-/// re-fires on the fresh machine, and a PRIVMSG delivered seconds after a
-/// reconnect is a surprise, not a feature.
+/// Commands the core sends its actor. **At-most-once, by decision** (prompt 9b):
+/// dropped while disconnected — autojoin re-fires on the fresh machine, and a
+/// PRIVMSG delivered seconds after a reconnect is a surprise, not a feature. The
+/// drop is loud on stderr but carries no *outcome*: the `Ack` has already gone
+/// out and the correlation is gone with it, and a per-request delivery outcome
+/// needs a wire berth (a variant addition, so a real v1 break) that stage 4's
+/// handshake owes. The real confirmation is the echo: `echo-message` is in the
+/// requested caps, so our own PRIVMSG comes back as a `MessageAdded` from the
+/// authority that matters — and on a server without it, "sent" is unconfirmable
+/// by anyone, which is what at-most-once means.
+///
+/// The drop is loud, but the loud line never carries a message **body**: a PRIVMSG
+/// can be a NickServ `IDENTIFY`, and stderr is not where credentials go. Variant
+/// and target only.
 #[derive(Debug)]
 pub enum ActorCommand {
     Join(String),
     Privmsg { target: String, text: String },
+}
+
+/// A command named for a log line: variant and target, **never** the body. The
+/// only caller is the loud drop while disconnected, and a PRIVMSG's text can be a
+/// password (CLAUDE.md's secrets rule applies to logs as much as to config).
+fn describe(command: &ActorCommand) -> String {
+    match command {
+        ActorCommand::Join(channel) => format!("Join {channel}"),
+        ActorCommand::Privmsg { target, .. } => format!("Privmsg to {target}"),
+    }
 }
 
 /// What the actor reports back to the core task.
@@ -148,7 +169,16 @@ async fn run(params: ActorSpawn, mut commands: mpsc::Receiver<ActorCommand>) {
                         () = &mut sleep => break,
                         command = commands.recv() => match command {
                             None => return,
-                            Some(_) => { /* dropped while disconnected */ }
+                            // At-most-once, made loud: nothing can be reported
+                            // back (the Ack is already sent), so the one honest
+                            // thing left is to say it happened. Never the body —
+                            // a PRIVMSG can carry a NickServ password, and this
+                            // goes to stderr.
+                            Some(command) => eprintln!(
+                                "network {}: dropped while disconnected: {}",
+                                network.0,
+                                describe(&command)
+                            ),
                         },
                     }
                 }

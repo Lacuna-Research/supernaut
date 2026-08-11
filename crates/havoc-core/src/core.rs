@@ -17,7 +17,7 @@ use havoc_ipc::{
 };
 use tokio::sync::{broadcast, mpsc};
 
-use crate::bus::{Bus, ClientId, Directed};
+use crate::bus::{Bus, ClientId, DIRECTED_LANE_CAPACITY, Directed};
 use crate::connection::actor::{self, ActorCommand, ActorReport, ActorSpawn};
 use crate::connection::io::Security;
 use crate::connection::{Config as ConnectionConfig, Networks};
@@ -57,7 +57,7 @@ impl CoreHandle {
             self.next_client
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         );
-        let (tx, rx) = mpsc::channel(64);
+        let (tx, rx) = mpsc::channel(DIRECTED_LANE_CAPACITY);
         let broadcast = self.broadcast_handle.subscribe();
         self.attach.send((id, tx)).await.expect("core task alive");
         Session {
@@ -146,7 +146,7 @@ async fn run(
             }
             Some((client, request)) = requests.recv() => {
                 if let Some(response) = handle_request(&mut state, client, request).await {
-                    bus.direct(client, Directed::Response(response)).await;
+                    bus.direct(client, Directed::Response(response));
                 }
             }
             Some((network, report)) = reports.recv() => {
@@ -156,7 +156,7 @@ async fn run(
                 handle_outcome(&mut state, &bus, outcome);
             }
             Some(search) = searches.recv() => {
-                handle_search_outcome(&mut bus, search).await;
+                handle_search_outcome(&mut bus, search);
             }
             Some(read) = reads.recv() => {
                 handle_read_outcome(&mut state, &mut bus, read);
@@ -226,7 +226,19 @@ async fn handle_request(
                 }
             }
         },
-        RequestBody::SetReadMarker { .. } => error("SetReadMarker arrives in prompt 9".to_owned()),
+        // A write with a deferred response, exactly as Search and
+        // FetchBacklog are: the job goes behind the flush barrier and the
+        // outcome carries both the Ack and the broadcast event. A failed
+        // enqueue must not swallow the one promised Response.
+        RequestBody::SetReadMarker { buffer, seq } => {
+            match state
+                .storage
+                .set_read_marker(buffer, seq, client, id, state.reads_tx.clone())
+            {
+                Ok(()) => return None,
+                Err(e) => error(format!("storage unavailable: {e}")),
+            }
+        }
     };
     Some(Response { id, body })
 }

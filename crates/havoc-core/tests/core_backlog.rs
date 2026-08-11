@@ -11,7 +11,7 @@ use havoc_core::connection::io::Security;
 use havoc_core::core::{Core, NetworkSettings};
 use havoc_core::storage::{Storage, StorageClient};
 use havoc_ipc::{
-    Anchor, BufferId, Event, NetworkId, Request, RequestBody, RequestId, ResponseBody,
+    Anchor, BufferId, BufferKind, Event, NetworkId, Request, RequestBody, RequestId, ResponseBody,
 };
 
 fn settings(name: &str) -> NetworkSettings {
@@ -92,7 +92,7 @@ async fn attach_announces_unseen_buffers_and_serves_windows() {
     );
     assert!(
         announced.last_read_seq.is_none(),
-        "nothing writes last_read_seq until prompt 9b"
+        "no marker has been set for this buffer, so the column is still NULL"
     );
     assert!(
         a.broadcast.try_recv().is_err(),
@@ -191,6 +191,92 @@ async fn a_buffer_on_an_unconfigured_network_is_not_announced() {
             .is_err(),
         "an unresolvable buffer must never be announced"
     );
+
+    drop(core);
+    drop(storage);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The lane-capacity claim at the dispatch level, and the one dispatch-level
+/// regression test the lane rewrite has: 65 buffers is more than the pre-9b
+/// 64-slot lane could hold.
+///
+/// The shape matters, and two earlier versions of this test got it wrong. The first
+/// drained all 65 announcements *before* asking for a window, which let the old
+/// spawned replay task make progress so `try_direct` never saw a full lane. The
+/// second asked immediately but with nothing to order the two answers, which made
+/// the outcome a coin flip — the very nondeterminism this prompt's decision entry
+/// names (a task parked on a wedged lane vs. a loud kill), so it passed against the
+/// code it exists to pin.
+///
+/// What is deterministic: attach, then wait for the replay to have *landed* (on
+/// pre-9b code, to have filled the 64-slot lane and parked its task on the 65th),
+/// then ask for a window with **nothing drained**, then wait again so the answer's
+/// delivery attempt happens against that full lane. Only then drain, and assert the
+/// correlated Response arrived **at all** — the pre-9b failure is not a hang, it is
+/// a dropped response and a killed session (`client 1 is not draining its directed
+/// lane; dropping it and this read`), so arrival is the assertion. Verified: fails
+/// against prompt 9a's engine, passes here.
+#[tokio::test]
+async fn a_sixty_five_buffer_attach_replays_before_the_response() {
+    let (dir, storage) = store("corebacklog-65");
+    let client = storage.client();
+    let network = client.ensure_network("seed-net").expect("network");
+    for i in 1..=65 {
+        client
+            .ensure_buffer(network, &format!("#b{i}"), BufferKind::Channel)
+            .expect("buffer");
+    }
+
+    let core = Core::spawn(
+        storage.client(),
+        HashMap::from([(NetworkId(1), settings("seed-net"))]),
+        false,
+    );
+    // No pump, no reader task, and deliberately nothing drained below: this is the
+    // client the old lane could starve.
+    let mut a = core.attach().await;
+    // The replay is in flight from the moment of attach; give it time to land
+    // before anything else asks for anything.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    a.requests
+        .send((
+            a.id,
+            Request {
+                id: RequestId(65),
+                body: RequestBody::FetchBacklog {
+                    buffer: BufferId(1),
+                    anchor: Anchor::Latest,
+                    limit: 5,
+                },
+            },
+        ))
+        .await
+        .expect("send");
+    // Long enough that the window has been read from disk and handed to the bus
+    // while the lane still holds the whole replay.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let mut names = Vec::new();
+    let mut response = None;
+    while let Ok(Some(message)) =
+        tokio::time::timeout(Duration::from_millis(500), a.directed.recv()).await
+    {
+        match message {
+            Directed::Event(Event::BufferCreated { buffer }) => names.push(buffer.name),
+            Directed::Response(reply) => response = Some(reply),
+            other => panic!("unexpected traffic on the lane: {other:?}"),
+        }
+    }
+
+    assert_eq!(names.len(), 65, "one announcement per buffer, none dropped");
+    assert!(names.contains(&"#b65".to_owned()));
+    let response = response.expect(
+        "the correlated Response must arrive even though the client drained \
+         nothing until after the replay filled its lane",
+    );
+    assert_eq!(response.id, RequestId(65));
+    assert!(matches!(response.body, ResponseBody::Backlog { .. }));
 
     drop(core);
     drop(storage);

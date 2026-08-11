@@ -1,9 +1,9 @@
-//! Delivery of read answers: search hits and backlog windows out to the session
-//! that asked, and the attach-time buffer announcement. Split from core.rs for
-//! the size ratchet; the grouping is the read path's whole delivery story, and
-//! the two lane disciplines it uses sit next to each other on purpose —
-//! [`Bus::direct`] for search's ordered Response-then-Event pair, the
-//! non-blocking [`Bus::try_direct`] for a window.
+//! Delivery of read answers and the read-marker write's outcome: search hits,
+//! backlog windows, the marker's Ack-plus-event pair, and the attach-time buffer
+//! announcement. Split from core.rs for the size ratchet; the grouping is the
+//! core loop's whole delivery story, and since prompt 9b it uses exactly one
+//! lane discipline — [`Bus::direct`], which never awaits, so nothing here can
+//! stall the select loop or the storage thread behind it.
 
 use std::collections::HashMap;
 
@@ -16,7 +16,12 @@ use crate::storage::{ReadOutcome, SearchOutcome};
 /// Response first (Ack, or the SQLite error for a malformed MATCH — user
 /// input never hangs and is never swallowed), then the correlated hits on
 /// the directed lane only. Errors get no event.
-pub(super) async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome) {
+///
+/// Not async, deliberately: with **no await point between the two calls**, the
+/// ordered pair is indivisible — either both messages land or the lane is
+/// already gone and the session is over. That is the answer to "what does half a
+/// delivered pair mean": it is unrepresentable.
+pub(super) fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome) {
     let SearchOutcome {
         client,
         request,
@@ -30,8 +35,7 @@ pub(super) async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome)
                     id: request,
                     body: ResponseBody::Error { message },
                 }),
-            )
-            .await;
+            );
         }
         Ok(rows) => {
             bus.direct(
@@ -40,8 +44,7 @@ pub(super) async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome)
                     id: request,
                     body: ResponseBody::Ack,
                 }),
-            )
-            .await;
+            );
             let hits = rows
                 .into_iter()
                 .map(|(buffer, m)| wire(buffer, m))
@@ -49,16 +52,15 @@ pub(super) async fn handle_search_outcome(bus: &mut Bus, outcome: SearchOutcome)
             bus.direct(
                 client,
                 Directed::Event(Event::SearchResults { request, hits }),
-            )
-            .await;
+            );
         }
     }
 }
 
-/// Read answers go out non-blocking ([`Bus::try_direct`]): a window is a big
-/// payload and a read is re-askable, so a reader that has stopped draining
-/// loses its lane rather than stalling the select loop and the storage thread
-/// behind it.
+/// Everything that comes back from a job behind the flush barrier. Delivery is
+/// [`Bus::direct`] throughout: a reader that has stopped draining loses its
+/// session rather than stalling the select loop and the storage thread behind
+/// it.
 pub(super) fn handle_read_outcome(state: &mut CoreState, bus: &mut Bus, outcome: ReadOutcome) {
     match outcome {
         ReadOutcome::Backlog {
@@ -75,8 +77,39 @@ pub(super) fn handle_read_outcome(state: &mut CoreState, bus: &mut Bus, outcome:
                 },
                 Err(message) => ResponseBody::Error { message },
             };
-            bus.try_direct(client, Directed::Response(Response { id: request, body }));
+            bus.direct(client, Directed::Response(Response { id: request, body }));
         }
+        // The marker's outcome is a pair on *different* lanes, and therefore
+        // deliberately unordered relative to each other: `Ack` to the requester,
+        // `ReadMarkerChanged` to everyone. A failed write is not state, so it
+        // gets the Error response and no event — search's rule, same reason.
+        ReadOutcome::MarkerSet {
+            client,
+            request,
+            buffer,
+            seq,
+            result,
+        } => match result {
+            Ok(()) => {
+                bus.direct(
+                    client,
+                    Directed::Response(Response {
+                        id: request,
+                        body: ResponseBody::Ack,
+                    }),
+                );
+                bus.broadcast(Event::ReadMarkerChanged { buffer, seq });
+            }
+            Err(message) => {
+                bus.direct(
+                    client,
+                    Directed::Response(Response {
+                        id: request,
+                        body: ResponseBody::Error { message },
+                    }),
+                );
+            }
+        },
         ReadOutcome::Buffers { client, result } => match result {
             Err(message) => eprintln!("attach: buffer announcement failed: {message}"),
             Ok(rows) => announce(state, bus, client, rows),
@@ -89,16 +122,22 @@ pub(super) fn handle_read_outcome(state: &mut CoreState, bus: &mut Bus, outcome:
 /// buffer from a previous run answer "buffer's network is not connected"
 /// instead of "unknown buffer".
 ///
-/// Delivery is a short-lived task holding a clone of the session's lane: a
-/// just-attached client may not be reading yet and the list can exceed the
-/// lane's 64 slots, so neither the core loop nor the storage thread may wait on
-/// it. Ordering against broadcast traffic is deliberately not guaranteed; the
+/// Delivered **inline from the core loop** (prompt 9b): the replay used to be a
+/// spawned task holding a lane clone, which made the map entry no longer the
+/// only aliveness token — a task parked on a wedged lane kept it alive, so
+/// whether a stalled client was killed loudly or lingered as a zombie was
+/// nondeterministic. `Bus::direct` cannot block, so there is nothing left for a
+/// task to buy. Ordering against broadcast traffic is still not guaranteed; the
 /// contract is that announcements are **idempotent** — a duplicate is legal, a
-/// missing one is not — which is also what makes the race between this snapshot
-/// and a concurrent `BufferCreated` a non-event.
+/// missing one is not.
+///
+/// That contract holds only while the lane is live. If `direct` reports the lane
+/// gone, the replay is abandoned mid-list: under `Full` the client has been dropped
+/// by policy, so it is not a client owed a complete buffer set any more — it is a
+/// dead session, and finishing the list into a removed lane would say otherwise.
 fn announce(
     state: &mut CoreState,
-    bus: &Bus,
+    bus: &mut Bus,
     client: ClientId,
     rows: Vec<crate::storage::BufferRow>,
 ) {
@@ -127,23 +166,11 @@ fn announce(
             last_read_seq: row.last_read_seq,
         });
     }
-    if announcements.is_empty() {
-        return;
-    }
-    let Some(lane) = bus.lane(client) else {
-        return;
-    };
-    tokio::spawn(async move {
-        for buffer in announcements {
-            if lane
-                .send(Directed::Event(Event::BufferCreated { buffer }))
-                .await
-                .is_err()
-            {
-                return;
-            }
+    for buffer in announcements {
+        if !bus.direct(client, Directed::Event(Event::BufferCreated { buffer })) {
+            return;
         }
-    });
+    }
 }
 
 pub(super) fn wire(buffer: BufferId, message: crate::storage::StoredMessage) -> havoc_ipc::Message {
