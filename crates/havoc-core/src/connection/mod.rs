@@ -10,6 +10,7 @@ pub mod actor;
 mod caps;
 pub mod ingest;
 pub mod io;
+mod trace;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 

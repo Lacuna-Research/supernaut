@@ -21,6 +21,7 @@ nick = "alice"
 [networks.libera]
 host = "irc.libera.chat"
 autojoin = ["#supernaut", "#rust"]
+sasl_account = "alice"
 
 [networks.ergo-local]
 host = "localhost"
@@ -41,6 +42,14 @@ fn a_full_file_parses_and_lowers() {
     let config = config::parse(FULL, &base()).expect("parses");
     assert_eq!(config.nick, "alice");
     assert_eq!(config.networks.len(), 2);
+    // Read before the lowering, which is where the binary reads it too — the
+    // account name does not survive into `NetworkSettings`, because the secret
+    // it pairs with is not in this file.
+    assert_eq!(
+        config.networks["libera"].sasl_account.as_deref(),
+        Some("alice")
+    );
+    assert_eq!(config.networks["ergo-local"].sasl_account, None);
 
     let networks = config.into_networks();
     let libera = networks
@@ -51,7 +60,8 @@ fn a_full_file_parses_and_lowers() {
     assert_eq!(libera.connection.nick, "alice");
     assert_eq!(libera.connection.username, "alice");
     assert_eq!(libera.connection.autojoin, ["#supernaut", "#rust"]);
-    // Config has no credential surface to lower from (§5.8); the binary injects.
+    // Config holds only the account name (§5.8), so the lowering has no secret
+    // to carry: the binary joins it to the keyring's half afterwards.
     assert!(libera.connection.sasl.is_none());
     assert!(matches!(libera.security, Security::Tls { .. }));
 
@@ -239,6 +249,72 @@ fn autojoin_entries_that_would_corrupt_the_join_line_error() {
         &base(),
     )
     .expect("names are the server's business, line integrity is ours");
+}
+
+/// The account name is framed into `authcid\0authcid\0password`, so a control
+/// character splits our own payload — the same "the line is ours, the policy is
+/// the server's" boundary `autojoin` and `nick` draw. What a network *permits*
+/// as an account name stays unpoliced.
+#[test]
+fn a_sasl_account_that_would_corrupt_the_plain_payload_errors() {
+    let spaced = err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"al ice\"\n");
+    assert!(
+        spaced.contains("sasl_account") && spaced.contains("network n"),
+        "the message must name the network and the key: {spaced}"
+    );
+    let injected = err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"a\\u0000b\"\n");
+    assert!(injected.contains("sasl_account"), "{injected}");
+    let empty = err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"  \"\n");
+    assert!(
+        empty.contains("sasl_account") && empty.contains("empty"),
+        "{empty}"
+    );
+    // Odd but legal account names are the network's business, not ours.
+    config::parse(
+        "nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"alice@example.net\"\n",
+        &base(),
+    )
+    .expect("account-name syntax is the network's business");
+}
+
+/// SASL PLAIN puts the password on the wire; `plaintext` leaves the wire
+/// readable. Stricter than §2.3 demands, exactly like the loopback rule beside
+/// it — relaxing it is stage 2 item 7's product call.
+#[test]
+fn sasl_account_with_plaintext_errors() {
+    let message = err(r#"
+nick = "alice"
+[networks.local]
+host = "localhost"
+plaintext = true
+sasl_account = "alice"
+"#);
+    assert!(
+        message.contains("sasl_account")
+            && message.contains("plaintext")
+            && message.contains("cleartext"),
+        "the refusal must name both keys and the reason: {message}"
+    );
+}
+
+/// `sasl_account` is a name, not a credential, so it is deliberately absent from
+/// `CREDENTIAL_KEYS` — whose message says *credentials*, and would be lying if it
+/// caught this key. Pinned, because "add it for symmetry" is the tempting bug.
+#[test]
+fn sasl_account_is_not_treated_as_a_credential_key() {
+    config::parse(
+        "nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"alice\"\n",
+        &base(),
+    )
+    .expect("an account name is not a secret");
+    // While the four secret-shaped keys keep being refused beside it.
+    let message = err(
+        "nick = \"a\"\n[networks.n]\nhost = \"h\"\nsasl_account = \"a\"\nsasl_password = \"p\"\n",
+    );
+    assert!(
+        message.contains("sasl_password") && message.contains("credential set"),
+        "the refusal must point at the command that replaces the key: {message}"
+    );
 }
 
 /// The refusal list must hold in *any* version of the schema, so it walks arrays

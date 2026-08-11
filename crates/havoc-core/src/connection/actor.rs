@@ -11,6 +11,7 @@ use havoc_ipc::{ConnectionPhase, NetworkId};
 use tokio::sync::mpsc;
 
 use super::io::{AnyLineTransport, LineTransport, Security};
+use super::trace::redact_outbound;
 use super::{Config, Machine, State, ingest};
 
 /// Commands the core sends its actor. **At-most-once, by decision** (prompt 9b):
@@ -226,7 +227,7 @@ async fn attempt_once(
     let (mut machine, opening) = Machine::start(config);
     for line in opening {
         if trace {
-            eprintln!(">> {line}");
+            eprintln!(">> {}", redact_outbound(&line));
         }
         if transport.send_line(&line).await.is_err() {
             return Attempt::Lost {
@@ -276,7 +277,7 @@ async fn attempt_once(
                 let replies = machine.handle_message(&parsed);
                 for reply in replies {
                     if trace {
-                        eprintln!(">> {reply}");
+                        eprintln!(">> {}", redact_outbound(&reply));
                     }
                     if transport.send_line(&reply).await.is_err() {
                         return Attempt::Lost {
@@ -319,7 +320,10 @@ async fn attempt_once(
                     ActorCommand::Privmsg { target, text } => format!("PRIVMSG {target} :{text}"),
                 };
                 if trace {
-                    eprintln!(">> {line}");
+                    // No command can produce an AUTHENTICATE line today; the
+                    // redactor is applied anyway, so there is one outbound trace
+                    // rule rather than two sites to remember to keep in step.
+                    eprintln!(">> {}", redact_outbound(&line));
                 }
                 if transport.send_line(&line).await.is_err() {
                     return Attempt::Lost {

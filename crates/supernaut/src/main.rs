@@ -1,6 +1,7 @@
 //! The Supernaut binary: arg parsing, wiring, mode selection — per NORTH-STAR
 //! §4.2 and its naming amendment (Supernaut app, havoc engine).
 
+mod credentials;
 mod session;
 mod session_backlog;
 mod session_print;
@@ -27,6 +28,25 @@ struct Cli {
 enum Command {
     /// Debug session: drive the havoc engine over the typed boundary.
     Session(session::SessionArgs),
+    /// Manage the SASL passwords in the OS keyring.
+    Credential {
+        #[command(subcommand)]
+        action: CredentialAction,
+    },
+}
+
+/// `set` and nothing else: a `get` would print what NORTH-STAR §5.8 forbids
+/// printing, and the session's own startup error is already the diagnostic that
+/// says whether an entry is there. `rm` arrives when somebody needs it.
+#[derive(clap::Subcommand, Debug)]
+enum CredentialAction {
+    /// Store a configured network's SASL password, read from **stdin**. Never
+    /// from an argument: `ps` is world-readable.
+    Set {
+        /// The network name, as the config file spells it. The account name is
+        /// read from that network's `sasl_account` key.
+        network: String,
+    },
 }
 
 fn main() -> ExitCode {
@@ -52,6 +72,17 @@ fn main() -> ExitCode {
                 }
             }
         }
+        // No tokio runtime: talking to the keychain is a blocking syscall and
+        // this subcommand dials nothing.
+        Some(Command::Credential {
+            action: CredentialAction::Set { network },
+        }) => match credentials::set(&network) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(message) => {
+                eprintln!("{message}");
+                ExitCode::FAILURE
+            }
+        },
     }
 }
 
@@ -126,6 +157,23 @@ pub(crate) fn default_config_path() -> Result<PathBuf, String> {
             "cannot locate config.toml: none of SUPERNAUT_CONFIG_DIR, XDG_CONFIG_HOME or HOME is set"
                 .to_owned()
         })
+}
+
+/// Locate, read and parse the config file: the one sentence both `session` and
+/// `credential set` say, so "cannot read config" reads identically whichever
+/// subcommand a person typed. `tls_ca` resolves against the file's own
+/// directory, which is why the base dir travels into the parser.
+pub(crate) fn load_config() -> Result<havoc_core::config::Config, String> {
+    let config_path = default_config_path()?;
+    let text = std::fs::read_to_string(&config_path).map_err(|e| {
+        format!(
+            "cannot read config {}: {e} — write the file, or point SUPERNAUT_CONFIG_DIR \
+             at the directory holding it",
+            config_path.display()
+        )
+    })?;
+    let base_dir = config_path.parent().unwrap_or(std::path::Path::new("."));
+    havoc_core::config::parse(&text, base_dir)
 }
 
 pub(crate) fn default_data_dir() -> Result<PathBuf, String> {

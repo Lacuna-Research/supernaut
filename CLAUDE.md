@@ -38,9 +38,9 @@ item, its notes, and the relevant source, never the previous session — never e
    acted on, deleted, and recorded in `**Carry-forward consumed:**` — as a pair.
 3. Push anything deferred into `PLAN.md` at the stage where it belongs.
 4. Run it live, not only under test: the debug CLI (headless stages) or the client,
-   against local `ergo` or Libera.Chat, isolated `SUPERNAUT_CONFIG_DIR`. A change with
-   no observable behavior may record `**Live run:** N/A (<reason>)` — claiming a run
-   that did not happen is the one dishonesty that matters most here.
+   against local `ergo` or a public network, isolated `SUPERNAUT_CONFIG_DIR`. A
+   change with no observable behavior may record `**Live run:** N/A (<reason>)` —
+   claiming a run that did not happen is the one dishonesty that matters most here.
 5. Bump the `**Status:**` line, then `make check`, merge, and leave the worktree — a
    prompt ends at the repo root, not in its worktree.
 
@@ -95,6 +95,6 @@ silently; prunes need none.
 Config `$XDG_CONFIG_HOME/supernaut` (TOML), data `$XDG_DATA_HOME/supernaut` (SQLite),
 socket `$XDG_RUNTIME_DIR/supernaut/core.sock` — overridable via `SUPERNAUT_CONFIG_DIR`;
 the program never writes to its own source tree, not even gitignored. Config paths are
-public API. SASL/NickServ credentials live in the OS keyring (encrypted-file fallback),
-never plaintext in config, logs, or the database. Fixture credentials must be
-recognisably fake, never a real-shaped token.
+public API. SASL/NickServ credentials live in the OS keyring (encrypted-file fallback
+deferred — PLAN stage 4 item 3), never in config, logs, or the database. Fixture
+credentials must be recognisably fake, never a real-shaped token.

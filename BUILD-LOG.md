@@ -2349,3 +2349,867 @@ ordering hazard the note is *about* survives 9b's change (the storage jobs behin
 announcement and the response still complete in their own order), so the note keeps its
 warning and loses its wrong mechanism, with a parenthetical saying it was corrected.
 Fixing a doc at the moment you touch it beats filing a ticket against yourself.
+
+## Decision — `keyring` 4.1.6 lives in the binary, at the platform default store
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/Cargo.toml`,
+`crates/supernaut/src/credentials.rs`
+
+**Chose:** `keyring = "4.1.6"` with default features (`default = ["v1"]`) declared in
+**`crates/supernaut`**, wrapped by a `credentials` module of ~140 lines. `keyring` was
+already on `DEP_ALLOWLIST` in `scripts/check-docs.sh`, seeded from NORTH-STAR §5, so no
+allowlist edit and therefore no `scripts/test-checks.sh` fixture is owed — the decision
+entry is.
+**Over:** (a) **havoc-core owning the store.** Rejected: core's test suite would then
+depend on the developer's login keychain and on OS state, which is the opposite of the
+"no file I/O, everything testable from a string" property `config.rs` was built for one
+prompt ago. A credential store is an OS integration belonging to whichever process
+assembles the core — today `supernaut`, at stage 4 `havocd`, a binary either way — and
+the type that crosses the seam, `SaslCredentials`, is already core's. (b) **`keyring-core`
+plus `apple-native-keyring-store` wired up directly.** Rejected because what we want is
+precisely the platform default, which is exactly what the `keyring` façade *is*; naming
+the store ourselves buys control we have no use for and a second thing to keep in step
+with the platform.
+**Because:** the seam is one function each way (`load`, `set`) over a stable façade, and
+the alternative that matters — a *non*-default store — is the deferred file fallback,
+which is what `keyring-core` exists for and where this gets revisited.
+**Measured, because the number is worse than the shape suggests:** `Cargo.lock` goes from
+**107 to 202 packages** — 95 new entries for a credential store — because keyring 4's
+`v1` feature enables *every* platform backend in the manifest and the gating is by target
+at build time, not by feature at resolve time. What actually compiles on
+`aarch64-apple-darwin` is eight crates: `keyring`, `keyring-core`,
+`apple-native-keyring-store`, `security-framework`, `security-framework-sys`,
+`core-foundation`, `core-foundation-sys`, plus `log` (and `bitflags`/`libc`, already in
+the tree). The other 87 — `zbus`, `secret-service`, `aes`, `num-bigint`, `async-io`,
+`regex`, `tracing`, `uuid`, `toml_edit` and the rest — are the Linux and Windows store
+backends and their transitive tails, resolved and locked but never built here. That is
+still real: a lock entry is a supply-chain surface, `cargo audit` reads it, and a CI
+runner on Linux *would* compile the zbus half. Recorded rather than glossed, because the
+tidy `cargo tree` for this target is the misleading view.
+**Revisit if:** we need a non-default store — the file fallback, a scratch keychain for
+CI, or a Linux target where the Secret Service is not the right answer. Then this becomes
+`keyring-core` plus exactly the stores we name, which also cuts the 95 lock entries down
+to the ones we use. A CI runner that builds on Linux is the other trigger: the compiled
+set there is the zbus tail, and it should be measured before it is trusted.
+
+## Decision — the encrypted-file credential fallback is deferred, and its absence is made loud
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`, `PLAN.md`
+stage 1 item 10 and stage 4 item 3
+
+**Chose:** ship the keyring half of §5.8's "keyring with encrypted-file fallback" only,
+and make the missing half speak: when the platform store is unavailable for any reason
+other than "no entry", `credentials::describe` says the OS keyring is unavailable, quotes
+the platform error, states that **there is no encrypted-file fallback yet**, and names
+the PLAN deferral by item. Filed on PLAN stage 4 item 3, due by stage 6 item 3.
+**Over:** (a) **building it now with `argon2` + `chacha20poly1305`.** Two dependencies off
+the allowlist, bought for a consumer that does not exist: the dogfood machine is a Mac
+with a working login keychain. (b) **keyring 4's own `db-keystore`.** Checked rather than
+assumed, and it is worse: it is Turso-backed — a *second* SQLite implementation beside
+rusqlite — and it still takes its data-encryption key as a hex string handed in by the
+application, so the key problem is exactly as unsolved and the dependency is far larger.
+(c) **a file "encrypted" with a key stored beside it.** Rejected as the worst of the
+three: obfuscation labelled encryption is worse than no fallback, because it reads as
+safe.
+**Because:** a fallback file needs a key, and every honest source of one is out of stage
+1's reach. A passphrase needs a no-echo prompt, and the terminal belongs to stage 2 item
+7; a machine-derived key is the obfuscation option; a key in another store is the store we
+are trying to substitute for. The boundary that keeps this honest is **absence must be
+loud** — the deferral is a sentence a user reads, not a gap they discover when SASL
+silently does not happen.
+**Revisit if:** the first target without a working platform store — which is exactly PLAN
+stage 4 item 3's daemon started at login against a locked Secret Service, or a headless
+Linux box. `keyring-core` with an explicit store is the route; the key's provenance is the
+design question, not the file format.
+
+## Decision — keyring entries are keyed by the config network name, and nothing else
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`
+
+**Chose:** service `"supernaut"`, account = the **config network's name** (`liverun`,
+`libera`), one entry per network.
+**Over:** (a) **`NetworkId`.** Rejected on the carry-forward's reasoning:
+`Config::into_networks` numbers networks `1..N` from `BTreeMap` order, so adding
+`[networks.aardvark]` renumbers everything after it. A keyring entry keyed by id would be
+the first thing in this program to persist a wire id, and it would silently re-point one
+network's credentials at another's after an edit that had nothing to do with credentials.
+(b) **`<network>:<account>`.** Rejected: it makes `credential set` need an account
+argument config already holds, and editing `sasl_account` would silently orphan the
+secret you stored five minutes ago. With the name alone, a mismatched account fails
+loudly at the server — fail-closed, and honest. (c) **hashing the config path into the
+service string.** Rejected, though it fixes a real cost.
+**Because:** the name is the stable key, and it is what storage keys on too, so there is
+one identity in the system rather than two. **What (c) would have fixed, said out loud in
+the module doc rather than left to be discovered:** the keychain namespace is
+process-global, so one `supernaut`/`liverun` item is shared by *every*
+`SUPERNAUT_CONFIG_DIR` on the machine — two config dirs naming a network `liverun` share
+one secret. The price of fixing it is an entry nobody can find in Keychain Access and
+nothing can share with stage 4's daemon, which is a worse trade for a single-user client.
+**Revisit if:** one machine ever runs two independent supernaut *installations* that must
+not see each other's credentials — a shared build box, or per-project config dirs holding
+different accounts on the same network. Then the service string grows a discriminator, and
+it should be human-readable (`supernaut:<profile>`), not a hash.
+
+## Decision — `credential set` reads stdin with echo on, rather than prompting
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`,
+`crates/supernaut/src/main.rs`, `PLAN.md` stage 2 item 7
+
+**Chose:** `supernaut credential set <network>` reads the secret from **stdin only**,
+trims exactly one trailing newline, refuses empty, and — when stdin is a TTY — prints one
+stderr line saying the input is not hidden and showing the pipe form.
+**Over:** (a) **argv (`--password`).** Never: `ps` is world-readable, which is the reason
+prompt 6 refused `--sasl-pass`. (b) **an interactive no-echo prompt**, either via a
+password-reading dependency or hand-rolled raw mode. Rejected for now. (c) an env var,
+which is what this prompt *deleted*.
+**Because:** stdin is the one seam that serves a human and a pipe identically, and it is
+what lets `scripts/live-run.sh` exercise the product's real write path instead of a
+harness-only shortcut. Suppressing echo is either a new dependency or raw-mode terminal
+code, and the terminal belongs to stage 2 item 7's first-run, which owns credential entry
+as a product experience. Shipping a half-hidden prompt now would put terminal code in the
+one binary that is supposed to have none. The TTY warning is the honest interim: the
+failure mode of a visible password is a person who does not know it was visible.
+**Revisit if:** stage 2 item 7 lands the first-run wizard — it adds a hidden prompt
+*beside* the pipe, and does not replace it; a pipe is how the next machine gets a
+credential without a human.
+
+## Decision — `sasl_account` beside `plaintext = true` is a config error, not a warning
+
+**Date:** 2026-08-10  **Affects:** `crates/havoc-core/src/config.rs`, `PLAN.md` stage 2
+item 7
+
+**Chose:** `Config::validate` refuses the pair by name, before anything dials, with a
+message that says SASL PLAIN puts the secret on the wire and plaintext leaves it
+readable.
+**Over:** a loud warning that still connects. Rejected.
+**Because:** §2.3's shape is that you say what you trust and never switch trust off, and
+this pairing does switch it off — it is the one combination where a *credential* is the
+thing exposed, so the loopback-only rule beside it bounds the blast radius to the box but
+does not make it fine. 10a's review flagged exactly this pairing under the old `--sasl`
+flag, when the flag made it a runtime accident; in config it is a written statement, and a
+written statement that leaks a password should not be honoured. A warning that connects is
+a warning nobody reads twice.
+**Revisit if:** stage 2 item 7 relaxes the loopback-only plaintext rule for a LAN
+bouncer — then a user authenticating to that bouncer is the real case, and the two rules
+must be decided together rather than one of them quietly outliving the other. Filed as a
+carry-forward note there naming both.
+
+## Decision — the stage-1 acceptance run moves to OFTC after Libera network-banned this IP
+
+**Date:** 2026-08-10  **Affects:** the prompt 10b entry below, `PLAN.md` stage 1
+Done-when and **Still open**, stage 3
+
+**Chose:** run stage 1's acceptance sequence against **OFTC** (`irc.oftc.net`, TLS 6697,
+stock webpki roots), and record the Libera clause of the Done-when as an open,
+user-owned gap.
+**Over:** (a) **retrying Libera.** Refused: mid-prompt, Libera answered
+`465 … You are banned from this server- Your bot is not permitted to connect to Libera
+Chat … (2026/8/11 02.58)` and closed the link. A ban is an instruction, not an error to
+work around, and the reconnect backoff knocking on it repeatedly is the specific harm to
+avoid — so the acceptance script gained a hard ban-guard that SIGKILLs the session on
+`465`/`464`/`ERROR` instead of letting the actor retry. (b) **appealing the ban** by
+mailing `bans@libera.chat`. Not ours to send: it is the user's identity, the user's IP and
+the user's relationship with a volunteer network. (c) **shopping for a third, busier
+network** until the search leg produced a stranger's chat line. Rejected after one
+substitution: each new connection from a freshly-banned IP with a realname that literally
+says "debug session" is another chance to get the user banned somewhere else, and the
+value of a second opinion is far below that cost. (d) **skipping the live acceptance run**
+and closing the stage on `scripts/live-run.sh` alone. Rejected outright — the whole point
+of the Done-when is a real network.
+**Because:** what the Done-when actually tests is TLS against a public network on the
+stock root store, autojoin from a config file, real traffic landing in SQLite, `kill -9`,
+restart over the same data dir, and search with filters over what the dead process wrote.
+OFTC proves all of that. It cannot prove SASL — it advertises no `sasl` capability at all
+— and neither could Libera without a registered account, so the SASL clause was
+unprovable at a public network in this session either way, which is why prompt 6's honest
+precedent (verify what ran, name what did not) is the one followed.
+**Revisit if:** the Still-open ban/account question is answered — then the acceptance
+sequence is re-run at Libera with SASL from the keyring, which is the one clause still
+owed, and it is a rerun of an existing script rather than new work.
+
+## Prompt 10b — Credentials and the stage acceptance run
+
+**Commit:** branch `prompt-10b-credentials` (PR open)  **Date:** 2026-08-10
+
+**Shipped:** the secret left the environment for the OS keychain. Config gains exactly
+one credential-adjacent key — `NetworkEntry::sasl_account`, an account *name* — and it is
+deliberately **not** on `CREDENTIAL_KEYS`, whose four names stay and whose message is
+upgraded from aspiration to instruction (it now names `sasl_account` and
+`supernaut credential set <network>`). Validation refuses empty-after-trim, whitespace and
+control characters in the account, stating the boundary rather than the exclusion: what a
+network permits as an account name is the network's business, but `authcid\0authcid\0
+password` is our payload to frame. `sasl_account` beside `plaintext = true` is a refusal,
+by name, before anything dials. New `crates/supernaut/src/credentials.rs` (138 lines) owns
+the store: `keyring = "4.1.6"`, service `"supernaut"`, account = the config network's
+*name*, `load` for the session and `set` for the new
+`supernaut credential set <network>` subcommand — stdin only, never argv, one trailing
+newline trimmed, empty refused, one confirmation line naming the entry and never the
+secret, and one stderr line when stdin is a TTY saying the input is not hidden. Three
+distinct failures, all before dialling and all non-zero: `NoEntry` names the service, the
+account and the exact command to run; `Ambiguous` says how many items to de-duplicate in
+Keychain Access; anything else says the keyring is unavailable, quotes the platform error,
+and names the deferred file fallback by PLAN item. `--sasl` and `SUPERNAUT_SASL_PASSWORD`
+are **deleted**, not deprecated, and `load_config` is lifted into main.rs so `session` and
+`credential set` say "cannot read config" identically. The lookup replaced the env read at
+the one existing injection site, for the **selected network only**, with the account name
+captured before `into_networks` consumes the config, and a comment saying why it is not a
+loop. `--trace-irc` no longer prints the SASL payload: a `redact_outbound` helper in
+`connection/actor.rs` turns `AUTHENTICATE <base64>` into `AUTHENTICATE <redacted>` at the
+three outbound trace sites — at the trace only, never at `send_line`, so the wire and the
+state-machine corpus are untouched. `scripts/live-run.sh` seeds and removes its own
+keychain item through the product's own write path under a bounded watchdog, and asserts
+that neither the fake password nor its base64 appears in `a.trace`, `a.out` or
+`.cache/last-a.trace`. No wire change (`PROTOCOL_VERSION` stays 1), no storage schema
+change, no migration. Six decisions above were made while doing this and are recorded
+there.
+
+**Deviations:** three, and the first is the one that matters.
+
+- **The stage acceptance run ran against OFTC, not Libera.Chat, because Libera
+  network-banned this IP mid-prompt.** Recorded as its own decision entry above, with the
+  four rejected alternatives (retry, appeal, shop for a third network, skip). The
+  coordinator had already settled that the Libera leg would be TLS-without-SASL, since no
+  registered account exists; the ban removed the host as well. `PLAN.md` stage 1's
+  Done-when now carries a paragraph naming exactly which clause went unproven, and
+  **Still open** carries the two user-owned questions (an account; the ban appeal).
+- **A sixth decision entry, and three PLAN notes the order did not name.** The order named
+  five decisions and three PLAN edits; the ban forced the sixth decision, and the
+  acceptance run itself surfaced two notes that are more valuable than anything the code
+  changed: stage 2 item 5 gets "on a network without `echo-message`, nothing you say is
+  ever stored" (observed, see Learned) and stage 3 gets "the USER realname is the const
+  `supernaut debug session`, and a real network read it as a bot and banned us".
+- **`scripts/live-run.sh`'s new never-in-logs loop got a file-existence check the order did
+  not ask for.** `grep -qF` on a missing path fails, and the loop read that as "the secret
+  is not in there" — a check that fails open, silently, which is the exact failure mode
+  CLAUDE.md's "a broken check fails open, and open is silent" names. Two lines, and the
+  reason is in a comment.
+
+**Deferred:** the encrypted-file fallback, with its own decision entry above, filed on
+PLAN stage 4 item 3 and due by stage 6 item 3; its absence is a sentence the user reads
+rather than a gap they discover. Nothing else from this prompt's scope was left undone —
+the trailable item in the budget (`credential set` refusing a network with no
+`sasl_account`) shipped, because the change came in at 313 lines against a cap of 800.
+
+**Learned:** four, in descending order of what they would have cost later.
+
+(1) **A real network's capability set is the thing that decides whether your own words
+exist.** OFTC answered `CAP * LS :multi-prefix` — one capability — so the client sent no
+`CAP REQ` at all, and the line it PRIVMSGed into its own channel is absent from `message`,
+from `backlog` and from `search`, while every inbound line the network sent landed and was
+searchable. Ingestion is inbound-only by design and `echo-message` is what makes our own
+text inbound; prompt 9b's carry-forward note said as much about *composer state*, and the
+consequence for *history* is a strictly bigger deal that nobody had written down. It cost
+this run its planned search corpus (the token line was never stored, so the first three
+searches came back `hits=0`) and it was recovered by searching what the network itself had
+sent — ChanServ's `#debian` welcome and the AUTH notices, real text written by the process
+that got killed. The general shape: **when a design says "the server tells us X", test
+against a server that does not.** Filed on PLAN stage 2 item 5 with stage 3 as the
+deadline.
+
+(2) **A ban is a measurement, and the thing it measured was our realname.** Libera's
+`465` says *"Your bot is not permitted to connect"*. Two candidate causes and both
+happened: a survey run that autojoined ten channels from one client, and a USER line whose
+realname is the const `"supernaut debug session"`. Prompt 10a carried that const verbatim
+on the reasoning that changing the USER line is "an observable protocol change with no
+benefit" — the benefit has now been supplied by a network refusing us. The transferable
+lesson is narrower than "be careful": **a string the program sends to strangers is not an
+implementation detail, and a placeholder in one is a promise to be misread.** Filed on
+PLAN stage 3, because a dogfood month cannot start on a network that bans you on day one.
+
+(3) **The keychain-ACL fear was unfounded, and settling it took one script.** The order
+flagged as unverified whether `security delete-generic-password` on an item created by
+*another* application (our ad-hoc-signed debug binary, whose cdhash changes every rebuild)
+prompts for authorization. It does not: probed in order, `delete` on nothing → exit 44,
+`credential set` → exit 0, `find` → exit 0, **`delete` on the product-created item → exit
+0, no dialog, no watchdog trip**, `find` again → exit 44. So the harness uses the product's
+own write path throughout and the documented `security add-generic-password -A` fallback
+was never needed. The watchdog stays anyway — it costs 20 lines and it is the difference
+between a loud failure and a CI run that hangs forever on an invisible dialog.
+
+(4) **95 lock entries for a credential store, 8 of them compiled.** Measured in the
+dependency decision above rather than discovered at audit time. `cargo tree` for this
+target shows a tidy eight-crate tail and is the misleading view; `Cargo.lock` nearly
+doubles, 107 → 202, because keyring 4's `v1` feature enables every platform backend in the
+manifest and gates them by *target* at build time rather than by *feature* at resolve time.
+The habit worth keeping: **for a new dependency, count the lock, not the tree.**
+
+**Measured:** 313 changed lines in `crates/` (271 added, 42 deleted) against the 800-line
+tripwire, and 1922 across the whole diff including `Cargo.lock`'s 95 new packages,
+`scripts/live-run.sh` and the docs. `cargo test --workspace`: **74 tests, all green**, up
+from 72 — three new in `tests/config.rs` (the PLAIN-payload validation, the
+`plaintext` pairing, and `sasl_account` pinned as *not* a credential key) and one in
+`actor.rs` (the redactor over four line shapes). Ratchets: `todo-count 0`,
+**`longest-file 399` against a ceiling of 400 — one line of headroom**, and the file at the
+wall is **`crates/havoc-core/src/connection/actor.rs`** (373 → 399; the 26 lines are the
+redactor and its test), not the test file the order expected to crack first
+(`crates/havoc-core/tests/config.rs`, 317 → 393, second at the wall; `session.rs` 355).
+Left at 400 rather than tightened to 399, because the value **worsened** and a ratchet only
+turns one way on an improvement — but the consequence is stated here so it is not a
+surprise: **the next prompt that adds a line to `actor.rs` fails `make check`, and the
+remedy is to split the file, not to raise the ceiling** (raising it is a decision entry).
+`redact_outbound` plus its test moving to a `connection/trace.rs` of their own is the
+obvious cut, and it was deliberately not made here — the order placed the helper and its
+test in `actor.rs`, and restructuring a module after the live runs and before the review is
+churn buying nothing this prompt needs. `credentials.rs` is 138 lines, `config.rs` 331. Clean `cargo build -p supernaut` after the dependency landed: 9.33s.
+
+**Live run:** four separate exercises, and the fourth did not go as planned.
+
+**1. `scripts/live-run.sh` — 46/46, exit 0, run twice** (up from 42; the four new
+assertions are the redaction line and the three never-in-logs files). Session A now
+authenticates with a credential that exists in nothing it can see: not its config (which
+holds `sasl_account = "alice"` and no secret), not its argv, not its environment. The
+regression net prompt 6 left in place still fires — `>> AUTHENTICATE PLAIN` and
+`903 … authentication successful` are both in `a.trace` — which is what proves the keyring
+produced a *real* credential rather than an empty string, and the payload line beside them
+now reads `>> AUTHENTICATE <redacted>`. Neither `fake-livetest-passw0rd` nor its
+`alice\0alice\0…` base64 appears in `a.trace`, `a.out` or `.cache/last-a.trace`. Sessions
+B–E never touch the keychain (no `sasl_account` in their configs), and after the run
+`security find-generic-password -s supernaut -a liverun` exits 44 — **the harness left no
+credential behind**, verified after both runs. `security … -g` appears nowhere in the
+repository.
+
+**2. The keychain-ACL probe** (`.cache/p10b/probe-keychain.sh`, gitignored): the five-step
+sequence in Learned (3), exit codes 44/0/0/0/44, no authorization dialog at any step, and
+the item confirmed to live in `~/Library/Keychains/login.keychain-db` — which is what the
+live-run header comment tells the reader it does to their machine.
+
+**3. The by-hand ergo acceptance, all four cases, isolated `SUPERNAUT_CONFIG_DIR`**
+(`.cache/p10b/byhand-ergo.sh`, gitignored), against a local ergo with a self-signed cert
+and `alice` pre-registered with NickServ. (1) A config naming `sasl_account = "alice"` with
+no keyring entry: **exit 1, nothing dialled**, and the message is
+*"no SASL password for network liverun: the OS keyring holds no item for service
+supernaut, account liverun. Store one: printf %s 'your-password' | supernaut credential set
+liverun"*. (2) `printf %s … | supernaut credential set liverun` → exit 0 and one line,
+*"stored a password in the OS keyring: service supernaut, account liverun (SASL account
+alice)"* — the entry named, the secret not. (3) The identical session command again: exit
+0, registered, autojoined, and the trace's SASL exchange verbatim —
+`>> AUTHENTICATE PLAIN`, `<< … AUTHENTICATE +`, `>> AUTHENTICATE <redacted>`,
+`<< … 900 … You are now logged in as alice`, `<< … 903 :Authentication successful` — with
+zero occurrences of the fake password or its base64 in either stdout or the trace. (4)
+`plaintext = true` beside the account key: **exit 1 from `config::parse`**, *"config:
+network liverun: `sasl_account` with `plaintext` would send the password in cleartext …
+Drop one of the two keys."* Then the keychain item removed, `find` exit 44.
+
+**4. The stage acceptance run — at OFTC, not Libera.Chat.** Libera first: with the
+hand-written config in a scratch `SUPERNAUT_CONFIG_DIR` and no `sasl_account`, the run got
+`<< :erbium.libera.chat 465 supernaut-smoke :You are banned from this server- Your bot is
+not permitted to connect to Libera Chat. Please email bans@libera.chat if you think this
+network ban was set in error. (2026/8/11 02.58)` followed by
+`<< ERROR :Closing Link: … (*** Banned )`. Not retried; see the decision entry and
+Learned (2). Substituted OFTC, one connection, two autojoin channels
+(`#supernaut-smoke` quiet, `#debian` busy), no speaking in the busy one, a short lurk, a
+clean quit, and a ban-guard that would SIGKILL on another refusal.
+
+- **Config, hand-written, verbatim:** `nick = "supernaut-smoke"`, one `[networks.oftc]`
+  table with `host = "irc.oftc.net"`, `autojoin = ["#supernaut-smoke", "#debian"]`. **No
+  `port`, no `tls_ca`, no `plaintext`, no `sasl_account`** — 6697 and the stock
+  webpki-roots store are the defaults being proven.
+- **Registered 12s after the process started**, TLS on the stock root store with no
+  configured anchor. Both autojoined channels had produced a stored row **0s later** —
+  neither `join` was ever typed. Five buffers appeared: `AUTH`, `CTCPServ`,
+  `#supernaut-smoke`, `#debian`, `ChanServ`.
+- **Traffic, as observed rather than as hoped:** across a 180s lurk, `#debian` produced
+  **zero** chat lines — 04:30 UTC in a support channel — and, per Learned (1), our own
+  PRIVMSG was never stored because OFTC advertises only `multi-prefix`. What *did* land was
+  real inbound text the network sent: four `AUTH` notices, ChanServ's `[#debian] Welcome to
+  #Debian…` notice, CTCPServ's `VERSION` request, our two joins and a `+n +t` mode line.
+  **9 rows, 9 `message-added` events, 5 storage commits.**
+- **`kill -9`, and the batch-timer question answered with a number:** `9` rows before the
+  kill (read by `sqlite3` from outside the process), `9` after. **Difference: 0 rows.** Not
+  "nothing was lost" as a promise — the measurement, on a run whose last write was ~2
+  minutes before the SIGKILL, which is exactly the case where a ~100ms batch timer has
+  nothing in flight. A kill mid-flood is still capable of losing one batch; this run had no
+  batch to lose, and that is what is claimed.
+- **Restart over the same `--data-dir`, identical command:** the attach announcement
+  resolved **all five** buffers before the process dialled anything, and
+  `backlog #debian after:0 50` / `backlog #supernaut-smoke after:0 50` read back lines
+  written by the dead process. The three planned searches returned `hits=0`, correctly and
+  for the reason above: the corpus held no chat text.
+- **The search leg, closed against the real text that did land** (`.cache/p10b/
+  oftc-phase3.sh`, gitignored) — a session over the same data dir with `connect` never
+  typed, so **`event connection-state` count 0: it dialled nothing**. Four searches over
+  what a real network wrote and a killed process stored: `search hostname` → **2 hits**
+  (`*** Looking up your hostname...`, `*** Couldn't look up your hostname`);
+  `search from:ChanServ Debian` → **1 hit** (the `#debian` welcome);
+  `search in:ChanServ "support channel"` → **1 hit**; `search in:AUTH "look up"` → **1
+  hit**, and notably not the `Looking up` line, which is FTS5 tokenisation being visible
+  rather than a bug. **Four searches, 0.036s wall time**, measured around the whole block.
+- **What could not be verified live, named rather than left implicit:** **SASL against a
+  public network.** OFTC advertises no `sasl` capability at all, and Libera would have
+  needed a registered account which does not exist — so the clause was unprovable at a
+  public network in this session by two independent causes. SASL from the keyring is
+  proven against local ergo, twice by hand and on every `scripts/live-run.sh` run, which
+  is the same honest shape prompt 6 recorded. Both halves of the gap are in PLAN's
+  **Still open** with the user named as their owner, and PLAN stage 1's Done-when now says
+  so in place.
+
+**Review:** pending.
+
+**Carry-forward consumed:** all seven notes attached to prompt 10b, deleted as one act
+with this entry.
+
+- *From prompt 6 (credentials half) — the env bridge must be deleted, not kept alongside.*
+  Done: `--sasl` and `SUPERNAUT_SASL_PASSWORD` are both gone from `session.rs`, the module
+  doc says why (a secret in the environment is the same plaintext §5.8 forbids in the
+  file, visible in `ps eww`, inherited by every child), and `scripts/live-run.sh` has no
+  other path to a credential — so the harness proves the real surface rather than a
+  fallback. Fixture credential is `fake-livetest-passw0rd`.
+- *From prompt 10a — the SASL injection site is one place, and it is the place the keyring
+  replaces.* Applied exactly: the shape did not move, only where the two halves come from.
+  `into_networks` still lowers `sasl: None` (its doc now says where the secret comes from
+  instead of merely that it is absent), and `run()` joins the account name from config to
+  `credentials::load`'s half after lowering.
+- *From prompt 10a — `sasl_account` must leave the refusal list and enter the schema in one
+  commit, and must not be added to that list "for symmetry".* Both halves done in this
+  commit, and the "for symmetry" trap is now **pinned** by
+  `sasl_account_is_not_treated_as_a_credential_key`, which also asserts the four secret
+  names still refuse beside it and that the refusal message names `credential set`. The
+  list's doc comment says why the account name is not on it: the message says credentials,
+  and the lie would be in the error a user reads.
+- *From prompt 10a — key entries by the config network name, never `NetworkId`.* Done, with
+  its own decision entry recording the two rejected alternatives and the cost of the one
+  chosen (one keychain namespace across every `SUPERNAUT_CONFIG_DIR`, said out loud in the
+  module doc).
+- *From prompt 10a — resolve the secret for the selected network only.* Done, with the
+  comment the note asked for so nobody "fixes" it into a loop over the map. Verified from
+  outside: live-run sessions B–E have no `sasl_account` and touch the keychain zero times.
+- *From prompt 10a — the live-run credential surface is two lines and `write_config` is
+  fixed-shape.* The helper gained a fifth optional `sasl_account` argument emitted from an
+  `if` block, never a trailing `[ -n … ] &&` test (which under `set -e` would make an
+  absent value the function's failing last command — the comment already there says why).
+  The credential now reaches the store through `"$BIN" credential set liverun` under a
+  watchdog, with `security delete-generic-password` before the seed and again in
+  `cleanup()` *before* the `KEEP_WORK` early return.
+- *From prompt 10a — the acceptance run needs a hand-written config in an isolated
+  `SUPERNAUT_CONFIG_DIR`, budgeted as its own step.* Budgeted, and the budget was the
+  right call: the step consumed a Libera ban, a network substitution, a capability
+  discovery and a third script. Had it been treated as a one-liner at the end of the
+  prompt it would have been discovered with no time left to be honest in.
+
+**Carry-forward raised:** none to a later prompt in `STAGE-1-PROMPTS.md` — 10b is the last
+prompt of stage 1, so every note goes to `PLAN.md` at the stage that will need it. **Five,
+all recorded above at the moment they were raised:** stage 2 item 5 (nothing you say is
+stored without `echo-message` — the history half of a note that previously existed only as
+a composer-state warning; deadline stage 3); stage 2 item 7 (two notes: there is no no-echo
+password prompt and this item owns the terminal that would give it one; `sasl_account` +
+`plaintext` is stricter than §2.3 asks and relaxing it is the same call as the loopback
+rule beside it); stage 3 (the USER realname is a const that says "debug session" and a real
+network read it as a bot); stage 4 item 3 (the encrypted-file fallback, with stage 6 item 3
+as the deadline and the requirement that `credentials.rs`'s error text be updated in the
+commit that closes it). Plus two entries on PLAN's **Still open** list, both user-owned and
+both marked *(not blocking)*: a registered account to prove SASL with, and the Libera ban
+appeal. None came from a harvest sub-agent — the post-prompt review has not run yet, and
+its findings will be dispositioned in an addendum below, as 9a, 9b and 10a did.
+
+## Prompt 10b — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 10b entry above; PR #17, second commit
+
+Appended rather than edited into that entry, for the reason 9a's, 9b's and 10a's addenda
+recorded: the entry is committed and pushed, so revising it in place trips
+`log-append-only` on the staged diff.
+
+**Review verdict:** the order was executed faithfully and the fence is fully clean — no
+second credential store of any kind, no `credential get`/`status`, no interactive prompt,
+no password-shaped key in the schema, `sasl_account` correctly absent from
+`CREDENTIAL_KEYS`, no map walk, nothing keyed by `NetworkId`, no mechanism key, the
+connect-time SASL failure policy untouched, redaction at the trace and not at `send_line`,
+no autoconnect, `PROTOCOL_VERSION` still 1, no migration, and no dependency beyond
+`keyring`. The findings were about **whether the new guarantees actually hold**, not about
+the shape of the design — and the highest one is the best kind: an assertion that passed
+for the wrong reason.
+
+**Shipped:** six fixes.
+
+(1) **The highest finding, and the assertion it fixes was provably inert:
+`scripts/live-run.sh` computed the never-in-logs base64 with the wrong SASL framing.**
+It used `printf 'alice\0alice\0%s'` — `authcid\0authcid\0password` — but SASL PLAIN is
+`authzid\0authcid\0password` and `connection/caps.rs` sends an **empty authzid**, so the
+wire carries `\0alice\0…`; caps.rs's own unit test pins `\0alice\0sesame` and the entry
+above quoted the wrong shape too. The check was therefore searching every log for a string
+the program can never emit. **Verified by breaking the redactor on purpose**, which is the
+only way to know an absence-assertion works: with `redact_outbound` returning `line`
+unchanged, the corrected check FAILs on `a.trace` and on `.cache/last-a.trace` (and the
+`<redacted>` assertion fails beside it), the run exits 1 at 43 ok. In that same leaking
+trace, `grep -cF` finds the **corrected** payload **twice** and the **old** payload
+**zero** times — so the fix is not a tidy-up, it is the difference between a live check and
+a decorative one. Redactor restored, and the line now carries a comment saying which
+framing is real and that this version was verified by breaking it.
+
+(2) **The watchdog's own FAIL line was silenced for both `security` calls.**
+`keychain_forget` wrote `with_watchdog … >/dev/null 2>&1 || true`, and that redirection
+applies to the *function*, so it swallowed the guard's `FAIL: … did not finish in 10s`
+along with `security`'s chatter — silencing precisely the line whose absence the watchdog
+exists to prevent, in the failure mode (an invisible authorization dialog) that is
+otherwise indistinguishable from a deadlock. `with_watchdog` now takes a `quiet|loud`
+argument that redirects the **inner command only**; `keychain_forget` passes `quiet`, the
+`credential set` seeding passes `loud`.
+
+(3) **`longest-file` was 399/400 with `actor.rs` at the wall, and "ratchets not worsened"
+did not hold** — 363 → 399 is a worsening even though it stayed under the ceiling, and the
+entry above recorded the number while declining the cut. The review is right that a stage
+boundary is the wrong place to hand the next prompt an unbudgeted split, so the cut named
+there was taken: `redact_outbound` and its four-case test moved to
+`crates/havoc-core/src/connection/trace.rs` (a `mod trace;` in `connection/mod.rs`, the
+helper `pub(super)`), whose module doc says both why it is its own module — the rule is
+about what a *log* may contain, not about driving a connection — and that the ratchet is
+the other reason. **Trajectory, recorded as asked: 363 → 399 → 393.** `actor.rs` is 352
+and no longer the longest file; the longest is now `crates/havoc-core/tests/config.rs` at
+393, seven lines of headroom instead of one. Still worse than 363, so the ceiling stays at
+400 rather than being tightened, and the next prompt to grow that test file splits it.
+
+(4) **`$WORK/a.pass` — a file holding the fake password — was never removed**, and under
+`KEEP_WORK` it survived, contradicting the header comment's promise that the credential
+lives in the keychain and nowhere else. `rm -f` immediately after the seeding call on both
+the success and the failure path. **Checked by running it, not by reading it:** a
+`KEEP_WORK=1` run is 46/46, `a.pass` is absent from the kept tree, and
+`grep -rlF fake-livetest-passw0rd` over that whole kept tree returns **zero files** — so
+the strong form of the claim holds, not just the narrow one.
+
+(5) **The store-unavailable error lost the platform error on exactly the platform that
+needs it.** `keyring::Entry::new` collapses every store-initialization failure into a bare
+`NoDefaultStore`, whose own message says only that there is no store — the real cause (the
+D-Bus or Secret Service error on a headless Linux box, or "platform not supported") is
+cached in `keyring::Entry::store_status()`. Verified against the 4.1.6 source rather than
+guessed: `Entry::new` returns `Err(Error::NoDefaultStore)` when `SET_CREDENTIAL_STORE_RESULT`
+is an error, and `store_status()` hands back that `&'static Result<()>`. `entry()` now
+consults it on that one variant and describes the underlying error, so the sentence the
+entry above promised a headless Linux user ("quote the platform error") is now actually the
+sentence they get.
+
+(6) **Two user-facing strings stated the PLAIN payload as `authcid\0authcid\0password`** —
+the config.rs validation comment and, worse, the refusal message a user reads — while the
+program sends `\0account\0password`. Same root cause as (1), which is the interesting part:
+one wrong mental model of the payload wrote itself into a comment, an error string, a shell
+assertion and a BUILD-LOG sentence. Both strings corrected, and the comment now names
+caps.rs's pinning test so the next reader checks rather than remembers.
+
+**Accepted as they stand, with reasons recorded rather than re-litigated:**
+
+- **The `Ambiguous` arm is unreachable on macOS.** Only the secret-service store constructs
+  it; the Apple store cannot return two matches for one service/account pair. Kept, per the
+  order, because the message is the correct thing to say if it ever fires — and recorded
+  honestly as **untested by construction on the dogfood platform**: no test exercises it
+  and none can here, so its text is reviewed prose, not verified behaviour.
+- **`credential set` trims only `\n`, so a CRLF pipe stores a trailing `\r`.** Literal
+  compliance with the order ("trims exactly one trailing newline and nothing else"), and
+  deliberately not widened: `\r` is a legal password character and guessing costs more than
+  it saves. The symptom is recorded so the next person recognises it: the password is
+  simply wrong at the server, with no local diagnostic, and the cause is invisible in a
+  confirmation line that never prints the secret.
+- **The watchdog orphans up to three `sleep 10` processes and has a narrow zombie race.**
+  Harmless in both directions — the guard finding no such pid is a no-op, and a stale guard
+  can only produce a spurious FAIL line, never mask a real failure. The one-line fix was
+  obvious while in the file, so it was taken (`pkill -P "$guard"` before killing the
+  subshell, with a comment saying a script that must never sleep should not leave sleeps
+  behind); the structure was left alone as instructed.
+- **The reviewer could not find the "ban-guard" in the diff, and was right not to.** It
+  lives in the ad-hoc acceptance script under `.cache/p10b/` (gitignored, like 10a's
+  by-hand script), not in the repository — so it protected *that run* and protects nothing
+  in the product. Said plainly rather than left to imply otherwise: **the committed
+  protection against a ban is the carry-forward note on PLAN stage 2 item 1, not a guard**,
+  and until that note is acted on the shipped client still retries a `465` forever.
+
+**Learned:** one, and it is the same lesson twice over. **An assertion about an absence is
+worthless until you have seen it fail.** Findings (1) and (4) are both "the check passed and
+the property did not hold" — a base64 string the program could never emit, and a promise
+about `KEEP_WORK` that nothing had run. Both were settled the same way, by making the bad
+state on purpose (break the redactor; run with `KEEP_WORK=1` and grep the kept tree), and
+both took under two minutes. The entry above already recorded a weaker version of this from
+10a's live run — "the new post-loop check did not fire, which is the correct outcome and not
+evidence it works; it was verified by reading" — so this is the second prompt in a row where
+a not-firing check went unexercised, and the first where doing the work found a real hole.
+**The rule that follows: a new assertion whose job is to prove something is *absent* lands
+with a recorded observation of it failing.** Not mechanized — no grep can tell a
+never-fired assertion from a correct one — so it is written here for the next
+detail-writing sub-agent, alongside 10a's disjoint-descope-list rule.
+
+**Measured after the fixes:** **476** changed lines in `crates/` against the 800 cap (was
+313 — the module split moves 60 lines and the diff counts them on both sides, plus fixes
+(5) and (6)). `cargo test --workspace`: **74 tests, all green** — unchanged, because the
+redactor's four-case test moved rather than multiplied. Ratchets: `todo-count 0`,
+**`longest-file 393`** against a ceiling of 400 (was 399, and the check's own hint to
+tighten is declined for the reason in fix (3)). New `trace.rs` is **60** lines,
+`actor.rs` is **352** (from 399), `credentials.rs` **149**,
+`crates/havoc-core/tests/config.rs` **393** — now the longest file in the tree.
+
+**Live run:** `scripts/live-run.sh` re-run **three** times after the fixes, because both the
+harness and the trace path changed. (1) With `redact_outbound` deliberately returning its
+input: **exit 1, 43 ok, 3 FAIL** — the `<redacted>` assertion and the never-in-logs check on
+both `a.trace` and `.cache/last-a.trace`, which is the evidence for finding (1) above. (2)
+Redactor restored: **46/46, exit 0**, keychain clean afterwards (`find` exit 44), no
+`a.pass` anywhere. (3) `KEEP_WORK=1`: **46/46, exit 0**, and the kept tree contains no file
+holding the fake password and no `a.pass`, with the keychain item still removed — because
+`keychain_forget` runs before the `KEEP_WORK` early return. The OFTC acceptance run was
+**not** repeated: nothing in these six fixes touches connection behaviour (the redactor
+moved modules; the rest is the harness, an error string and two comments), and a second
+connection to a public network for a no-op change is exactly the citizenship the ban taught.
+Said explicitly rather than left as a gap.
+
+**Review:** all six findings fixed, four accepted with reasons, **none rejected**. The
+review's highest finding was correct, its diagnosis exact (it named the empty authzid and
+pointed at caps.rs), and its proposed remedy sufficient — and it caught a claim the entry
+above made about its own verification that was not true, which is the finding class most
+worth having.
+
+**Carry-forward consumed:** none. All seven of 10b's notes were consumed by the first
+commit and recorded in the entry above; this commit deletes no carry-forward block.
+
+**Carry-forward raised:** **six, all adopted from the review's harvest, none rejected**, and
+one placement overruled by the coordinator. To `PLAN.md`, since 10b is stage 1's last prompt
+and no later prompt file exists to hold them: **stage 2 item 1** — a network that bans us is
+retried forever while a network that rejects our password is not, `465` unhandled in
+`connection/mod.rs`, observed live at Libera (**placed at stage 2, not the reviewer's
+suggested stage 3, by the coordinator's call: stage 3 ships nothing new by rule, and a
+dogfood month must not begin with a client that hammers networks that have said no**);
+**stage 2 item 7** — `credential set` requires `sasl_account` to exist first, which settles
+the first-run wizard's step order (config written and validated before the password is
+taken, not after); **stage 4 item 3** — the secret lives in the *login* keychain, so on
+macOS the engine must start as a launchd **Agent**, never a Daemon, or every
+`sasl_account` network gets a store-unavailable error with no config-side fix; **stage 5
+item 1** — the keyring read is a hard pre-dial failure of the whole process, so
+multi-network must write the very map loop stage 1 forbade, with per-network degradation and
+the failure surfacing as an event rather than a process exit; **stage 6 item 2** —
+`AUTHENTICATE` has no chunking and `redact_outbound` compares against `Plain.as_str()`
+alone, so a second mechanism is over-redacted and breaks live-run's assertions; **stage 6
+item 3** — the Linux keyring tree (~95 lock packages) is invisible to the allowlist check,
+which reads direct dependencies only.
+
+**A measurement the entry above asked for and could not have:** its dependency decision
+said a Linux CI runner "*would* compile the zbus half" and that this "should be measured
+before it is trusted". CI is `ubuntu-latest`, and it built and tested this PR **green in
+1m35s** — so the honest wording is now **compiled once, by a runner, unread by a human**,
+which is what the stage 6 item 3 note says. It is evidence that the Linux tree is not
+broken; it is not evidence that anyone has reviewed ~30 new crates, and the release item is
+where that distinction has to be paid.
+
+## Retrospective — Stage 1
+**Date:** 2026-08-10
+
+Stage 1 closed at 12/12: twelve prompts, 12 prompt entries plus 4 review addenda, 38
+decision entries, 2 corrections, and 5 questions still open. The engine connects to a real
+network over TLS with SASL, logs what it sees into SQLite, and answers search, backlog and
+read-marker requests through a typed boundary a debug CLI drives. 74 tests. No UI.
+
+**CLAUDE.md:** re-read end to end. **Two corrections, no prunes, and the honest reason
+for that.** Corrected: (1) the Secrets paragraph promised "the OS keyring (encrypted-file
+fallback)" as shipped fact when prompt 10b deferred the file half — now "(encrypted-file
+fallback deferred — PLAN stage 4 item 3)", the same staleness the drill found in
+NORTH-STAR §5.8 and fixed by the same reasoning; (2) the live-run rule named
+"local `ergo` or Libera.Chat" as the two targets, and Libera has network-banned this
+machine — now "local `ergo` or a public network", which is also the more durable sentence.
+**Nothing was pruned**, and that is a finding rather than a pass: at **100/100 lines the
+cap is fully consumed**, so the next rule that earns a place has to evict one, and no
+section is currently dead enough to volunteer. One genuine deletion *candidate*, proposed
+here rather than taken silently because deleting a rule wants a decision entry: "Vendored
+fixtures must record their upstream commit SHA" has no subject in the tree — the only
+external artifact is `ergo`, which is downloaded and sha256-verified by
+`scripts/live-run.sh`, not vendored. It has therefore never fired and cannot fire until
+something is actually vendored. Left in place for now (a rule that is merely dormant is
+cheaper than re-deriving it later), but it is the line to spend when the cap next binds.
+Two pointers deliberately **not** changed: line 4 still names `STAGE-1-PROMPTS.md` as the
+queue, which is true today and becomes false the moment `STAGE-2-PROMPTS.md` exists — so
+it is on the stage-2 opening checklist below, per the rule that a doc is fixed by the
+commit that stales it; and the `discipline-stats.txt` sentence still describes the
+telemetry as something the rule review argues from, which the Rule review section below
+shows is not yet true — the caveat lives at the mechanism (a comment in
+`scripts/check-docs.sh`) rather than costing a line here.
+
+**Docs audit:** every artifact opened and checked, not just the ones the drill named.
+
+- **NORTH-STAR.md** — two real staleness bugs, both fixed by a **dated appendix**
+  (2026-08-10), never by editing the section, which is this document's own rule. §9 listed
+  *buffer identity* and *config vs. runtime state* as open when both were settled in stage
+  1, and *the name* as open when the 2026-08-09 amendment settled it; the appendix marks
+  the three settled, points the two genuinely-open ones at PLAN, and states that **PLAN's
+  Still open list is the sole live register** — §9 is the snapshot this document opened
+  with. It also records a gap neither document had: §9 **omits** the licence question, and
+  PLAN does not carry it either, so it is owed before stage 6's release item. Separately,
+  §5.8's "keyring with encrypted-file fallback" now says the keyring half shipped and the
+  file half is deferred, with the item and deadline.
+- **README.md** — four fixes beyond the badge and row. "**Nothing runs yet**" was false: it
+  now says stage 1 is complete, names what the headless engine does, and says plainly that
+  there is no UI yet and nothing is packaged. The stage 1 heading said "(in progress)". And
+  the **Building** section gained the toolchain preconditions a fresh session on this
+  machine trips over first: `cargo` must be on `PATH` and Homebrew's rustup leaves it off,
+  with the exact `export`; plus `sqlite3`/`openssl`/`nc` for the live run, the pinned
+  `ergo` download, and the one login-keychain item that run creates and removes.
+- **PLAN.md** — current, because it was edited inside each prompt rather than swept at the
+  end; this stage added 43 carry-forward notes to later stages and 5 Still-open questions
+  that way. Stage 1 item 10's fallback wording and the stage 1 Done-when's honest
+  "what went unproven" paragraph both landed in prompt 10b's own commits.
+- **STAGE-1-PROMPTS.md** — status line at 12/12 with the new closing form, 10b's outcome
+  paragraph appended under its block, and **no `### Carry-forward` block left on any
+  prompt** (verified: the only two in the file are the preamble's convention heading and
+  its illustrative example, which sit above prompt 1 and which check 7's position counter
+  ignores by construction).
+- **scripts/check-docs.sh** — two comment-only edits, no behaviour change and therefore no
+  `test-checks.sh` fixture owed: the commented `2:STAGE-2-PROMPTS.md:18` line now says the
+  18 is an inherited template **placeholder** (PLAN's stage 2 has 7 items) to be set when
+  stage 2 is planned, and the ledger's definition now documents that it is per-checkout.
+- **METHOD.md** — read, nothing stale found; it describes the method's reasoning, which
+  this stage did not change.
+
+**Failure register:** two `## Correction` entries in the whole stage, and the register is
+exactly those entries and their `**Category:**` tags — stated because the drill (finding 6)
+could only infer it. Counts against `CATEGORY_LIMIT=3`: **`stale-doc-copy` 1**, the TLS
+decision entry that misstated its own alternative; **`convention-not-checked` 1**, merged
+branches never deleted, eleven times — a single correction covering eleven occurrences,
+which is the shape that matters here, because it closed its loop with a mechanical guard
+rather than a reminder. Neither category is trending: no second occurrence of either, and
+nothing at two. What the register does **not** capture, and should be read alongside: this
+stage's most expensive mistakes were caught by the post-prompt review and recorded as
+review findings, not as corrections — 10a's unvalidated `autojoin` line integrity and 10b's
+inert base64 assertion were both real shipped-or-nearly-shipped bugs. A correction entry is
+for a *past log entry* being wrong, so the register is deliberately narrower than "things
+we got wrong", and reading it as the latter would flatter the stage.
+
+**Rule review:** **the ledger does not exist, and that is the finding.**
+`discipline-stats.txt` is absent from the primary checkout, absent from this worktree, and
+absent from the machine — `find` over the whole repository returns nothing. The mechanism is
+sound in isolation (`err()` appends `date rule branch`, local runs only, deduplicated per
+day/rule/branch) but the **path is relative and prompts run in worktrees that are deleted
+when their PR merges**, so every prompt's telemetry died with its worktree, and the primary
+checkout has none because no prompt is ever run there. The consequence is precise and worth
+stating rather than glossing: **this review cannot distinguish "no rule ever fired in twelve
+prompts" from "every record was thrown away", and it therefore cannot argue from counts at
+all** — which is exactly the failure mode the ledger was introduced to prevent, arriving in
+a form nobody checked for. The instruction for this retrospective was to read the primary
+checkout's copy; there is no copy to read, so the instruction is answered by reporting its
+absence instead of inferring a zero. What can be said honestly without the ledger: no
+`make check` failure was observed locally in prompt 10b's own worktree across roughly a
+dozen runs, and the checks that visibly did work this stage did so as *blockers* rather than
+as telemetry — the size cap forced 10a's oversize justification, the ratchet forced two file
+splits, check 10 fused this retrospective into 10b's PR, and check 7 is what makes a
+consumed carry-forward a mechanical fact. **No rule is proposed for deletion on evidence,
+because there is no evidence**; the one dormant rule found by reading is the vendored-fixture
+SHA rule above. **The mechanization this review does earn** is the fix to the ledger itself:
+anchor the path at the parent of `git rev-parse --git-common-dir` so every worktree appends
+to one file. It is a behaviour change, so it lands with fixtures in
+`scripts/test-checks.sh`, and it is **owed by the commit that opens stage 2** — recorded
+here and in a comment at the mechanism, deliberately not filed under a PLAN feature item,
+because PLAN has no numbered item for tooling and burying tooling under "Embedded-mode
+wiring" is how a note stops being read. Deferred out of this PR on the coordinator's
+prefer-filing guidance, and because a check that lands without its fixtures is the thing
+CLAUDE.md forbids most specifically.
+
+**Cold-start drill:** a fresh sub-agent, given only the repository at commit `cdc431c`, was
+asked what comes next and why. **It got the answer right**: it identified the project, that
+stage 1 was the active stage, that prompt 10b's implementation was complete, and that the
+next unit of work was this closing commit — the retrospective plus the 12/12 bump. It also
+hit the anticipated status-lag state (`**Status:** 11/12` over finished 10b code) and
+**recognised it from the queue text rather than being misled by it**, which is the fused-PR
+decision working as designed — though only because it read 1,889 lines in to find the
+explanation. Thirteen gaps, with what each produced:
+
+1. **The status line said 11/12 over finished 10b code, with no pointer near the line.**
+   Transient — this commit ends it — but the pattern recurs at every stage boundary.
+   Recorded; the fused-PR decision in the 10b block already documents the window.
+2. **Nothing on disk says the implementation is finished and only the closing commit
+   remains; PR state is unknowable from documents.** Inherent: git and GitHub state are not
+   repository content. Recorded, not fixed.
+3. **No document said what follows "Next:" in a 12/12 status line.** **Fixed** by deciding
+   it: `**Status:** 12/12 complete. Stage 1 closed — retrospective in BUILD-LOG.md; stage 2
+   planning is next.` Verified against check 5's regex before committing — it captures the
+   count and accepts any text after "complete" — and against check 8, whose "Next: prompt M"
+   parse now yields empty and skips cleanly instead of failing.
+4. **Who opens stage 2, and the commented placeholder naming 18 prompts against PLAN's 7
+   items.** **Comment-only fix** in `check-docs.sh` saying the 18 is an inherited
+   placeholder to be set when stage 2 is planned; the opening sequence is recorded in Next
+   stage below.
+5. **`discipline-stats.txt` absent, and nothing said which checkout's ledger governs.**
+   **Fixed and escalated** — the drill found the symptom, and looking for the primary
+   checkout's copy found there is none anywhere. Documented at the mechanism, and the real
+   repair is owed by stage 2's opening commit. See Rule review, which this finding rewrote.
+6. **How the failure register's counts are produced was inferred, not stated.** **Fixed by
+   stating it**: the register is the `## Correction` entries and their `**Category:**`
+   tags. See Failure register.
+7. **NORTH-STAR §9 listed settled questions as open and omitted the licence, while PLAN
+   cites §9 as live.** **Fixed** by dated appendix.
+8. **§5.8 promised keyring *plus* fallback with no note the fallback is deferred.**
+   **Fixed** in the same appendix.
+9. **No rule said whether a stage may close with a Done-when clause unproven.** Recorded as
+   a principle, because it is the honesty rule's corollary rather than a new rule: **it may,
+   when the gap is named where the claim would be** — in the Done-when itself, in the
+   prompt's Live run section, and on Still open with an owner. The instance is SASL at a
+   public network. The alternative — holding a stage open until a volunteer network's ban
+   appeal is answered by a human who is not in the loop — would trade a named gap for an
+   unnamed stall, which is worse in exactly the way this log exists to prevent.
+10. **Whether a docs-only closing commit owes Shipped/Learned/Live-run.** Recorded: check 3
+    requires those sections only for `crates/` changes, and the retrospective template
+    governs this commit. The drill's inference was correct; saying so is the fix.
+11. **Drill circularity — its own fixes change the branch it ran against.** Recorded as
+    convention: **the drill runs once, against the finished branch (`cdc431c`), and its
+    fixes are its output.** It is not re-run to make it come out clean, because its purpose
+    is measurement, not a green light — re-running until there are no gaps would convert
+    the one honest instrument at the boundary into a formality.
+12. **The stage-acceptance evidence lives in gitignored `.cache/`; a fresh clone has only
+    prose.** Recorded as a deliberate trade, not an accident: the **committed recipe is the
+    Acceptance paragraph of the 10b block**, which is reproducible on any machine, while
+    logs are per-machine and would rot into fiction if committed. The cost is real — a
+    reader cannot audit the numbers, only re-run them.
+13. **Toolchain preconditions unstated; the Makefile calls bare `cargo`.** **Fixed** in
+    README's Building section, including the Homebrew-rustup `PATH` trap that every fresh
+    session on this machine hits first, the live run's other binaries, and the keychain item
+    it creates.
+
+Nine of the thirteen produced a documentation fix in this commit; four are recorded as
+inherent or as conventions. The drill's value was concentrated in the two it found that
+nobody had suspected — the missing ledger (5) and NORTH-STAR §9 (7) — both of which are
+documents *quietly disagreeing with reality* rather than documents that are merely thin,
+which is the class a fresh reader is uniquely able to see.
+
+**Ratchets:** `todo-count` **0** against a ceiling of 0 — at ceiling all stage, and no
+`TODO`/`FIXME`/`HACK` was ever committed. `longest-file` **393** against a ceiling of 400.
+**Neither ceiling was tightened, and the reason is that neither improved:** `longest-file`
+went 363 → 399 → 393 within prompt 10b alone (the redactor pushed `actor.rs` to one line of
+headroom; the review's fix moved it to `connection/trace.rs`, bringing `actor.rs` to 352),
+so 393 is a recovery from a self-inflicted worsening, not a gain, and tightening to it would
+turn the ratchet on the strength of a repair. `crates/havoc-core/tests/config.rs` is now the
+file at the wall at 393 — **seven lines of headroom, and the next prompt to grow it splits
+it**, because raising a ceiling is a decision entry and not a convenience. The ratchet did
+real work this stage: it forced two file splits that would otherwise have been argued about.
+
+**Next stage:** nothing was reordered, rescoped or deleted in PLAN.md at this boundary —
+stage 2's seven items still read correctly against what stage 1 actually shipped — but the
+stage does not open with a blank slate, and two proposals are named here rather than made
+silently, per the rule that structural changes are proposed and not enacted.
+
+**Opening stage 2 is its own first unit of work**, and it is one commit doing four things
+together, because any three of them without the fourth leaves `make check` describing a
+repository that does not exist: write `STAGE-2-PROMPTS.md` (with prompts 1–4 detailed and
+the rest carrying scope and fence only, per the JIT rule that stage 1 vindicated);
+uncomment the `STAGES` line and **set the real prompt total** in place of the inherited 18;
+move `README_STAGE` to 2 and add the stage 2 badge and progress table; and update
+CLAUDE.md's line 4 pointer from `STAGE-1-PROMPTS.md` to the new queue. The ledger fix from
+Rule review, with its `test-checks.sh` fixtures, belongs in that same commit — it is the
+one piece of tooling debt this stage leaves, and the next retrospective is unable to do its
+job without it.
+
+**Stage 1 left 43 carry-forward notes on later stages, and 19 of them are on stage 2** — 7
+on item 1 (embedded wiring), 6 on item 7 (first-run), 5 on item 5 (input and command line),
+1 on item 3 (scrollback). That distribution is the argument for both proposals.
+
+- **Proposal: handle `465` before the TUI work, not inside it.** Item 1's newest note is
+  that a network which bans us is retried forever, observed live at Libera during 10b's
+  acceptance run. It is engine-side, small, and independent of every UI decision around it,
+  and stage 3's dogfood month must not begin with a client that hammers networks that have
+  said no. Proposed as stage 2's first *code* prompt — ahead of embedded wiring — or as a
+  numbered item of its own.
+- **Proposal: pull item 7's *decisions* forward without moving its polish.** First-run is
+  listed last, but six stage-1 notes hand it questions that earlier items depend on: whether
+  config stays mandatory and how a wizard may write it, the no-echo prompt, whether the
+  loopback-only plaintext rule and the `sasl_account` + `plaintext` refusal relax, whether
+  validation moves off `parse`, and the step order `credential set` already forces (config
+  written and validated *before* the password is taken). Item 5's composer work and item 1's
+  wiring both touch the first two. Proposed: answer those as decision entries early in the
+  stage, and leave the wizard itself where it is.
+
+One thing stage 1 should be honest about handing over: **the two clauses of its own
+Done-when that closed with named gaps** — SASL against a public network (no registered
+account; Libera has network-banned this IP; OFTC advertises no `sasl` at all) and, found by
+the same run, that on a network without `echo-message` nothing the user says is stored at
+all. The first is on Still open with the user as owner. The second is on stage 2 item 5 with
+stage 3 as its deadline, and it is the more dangerous of the two, because it is not a gap in
+what was verified — it is a gap in what was *built*, discovered only because the acceptance
+run went somewhere the plan had not.

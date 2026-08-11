@@ -1,6 +1,6 @@
 # Supernaut
 
-![stage 1 progress](https://img.shields.io/badge/stage%201-11%2F12-blue)
+![stage 1 progress](https://img.shields.io/badge/stage%201-12%2F12-blue)
 
 A terminal IRC client for people who want the client to already be good, not to
 become good after three weekends of configuration.
@@ -10,9 +10,11 @@ state; a Ratatui frontend (`supernaut-tui`) owns nothing but the viewport. Moder
 IRC — TLS, SASL, IRCv3 — as the normal path. Every line you have ever seen lands
 in SQLite and is searchable in milliseconds.
 
-**Status: pre-alpha.** Nothing runs yet; the design baseline is written and the
-build is being stood up. Everything below describes what is being built, not what
-you can download today.
+**Status: pre-alpha.** Stage 1 is complete: the headless engine connects over TLS
+with SASL, logs everything it sees into SQLite, and answers search, backlog and
+read-marker requests — driven by a debug CLI. **There is no UI yet** (that is stage
+2), and nothing is packaged. Everything below describes what is being built, not
+what you can download today.
 
 ## The ethos
 
@@ -54,7 +56,7 @@ The living roadmap is [`PLAN.md`](PLAN.md) — stages, open questions, and
 reasoning live there, and it wins when this summary drifts. The table below is
 machine-checked against the work queue on every commit, so it cannot quietly rot.
 
-### Stage 1 — headless core (in progress)
+### Stage 1 — headless core (complete)
 
 The havoc engine alone: connect over TLS with SASL, log everything to SQLite,
 answer search and backlog requests — driven by a debug CLI, no UI yet.
@@ -72,7 +74,7 @@ answer search and backlog requests — driven by a debug CLI, no UI yet.
 | 9a | Windowed backlog | ✅ done |
 | 9b | Read markers and verb hardening | ✅ done |
 | 10a | Network config file | ✅ done |
-| 10b | Credentials and the stage acceptance run | ⬜ todo |
+| 10b | Credentials and the stage acceptance run | ✅ done |
 
 ### Stage 2 and beyond
 
@@ -104,3 +106,17 @@ make check              # documentation discipline (also runs on pre-commit and 
 ```
 
 New clones: `make hooks` once, to install the git hooks.
+
+The Makefile calls `cargo` bare, so it must be on your `PATH`. Installing rustup
+from Homebrew (rather than from rustup.rs) leaves it off by default — if
+`cargo --version` fails, add it:
+
+```
+export PATH="$HOME/.cargo/bin:/opt/homebrew/opt/rustup/bin:$PATH"
+```
+
+`scripts/live-run.sh` additionally needs `sqlite3`, `openssl` and `nc`, and
+downloads a pinned `ergo` into gitignored `.cache/` on first use. On macOS it
+creates and then removes one login-keychain item (service `supernaut`, account
+`liverun`) holding a recognisably fake password; the script's header comment says
+so too.

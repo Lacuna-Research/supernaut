@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 11/12 complete. Next: prompt 10b.
+**Status:** 12/12 complete. Stage 1 closed — retrospective in BUILD-LOG.md; stage 2 planning is next.
 
 <!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
@@ -1850,59 +1850,325 @@ never plaintext secrets in the config file, ever (§5.8). Ends with the stage-1
 acceptance run: connect to a real network from config alone, join, log, kill,
 restart, search — the "Done when" of the stage, driven end to end.
 
-*To be written out before it starts.*
+```
+The secret leaves the process's environment for the OS keychain: after this prompt a
+person writes `sasl_account = "alice"` in their config, pipes the password once into
+`supernaut credential set <network>`, and every later session authenticates with SASL
+from a config file plus a keychain entry — no flag, no env var, and no path by which a
+password can be typed into the config file or printed into a trace.
 
-### Carry-forward
+Four places the plan, the stub, and reality pull apart, surfaced rather than resolved
+silently:
 
-- From prompt 6 (credentials half): **the env bridge must be deleted, not kept
-  alongside.** `crates/supernaut/src/session.rs` hardcodes `[Plain]` and reads
-  `SUPERNAUT_SASL_PASSWORD`; the keyring path replaces both, and fixture
-  credentials in the harness must stay recognisably fake (CLAUDE.md).
-- From prompt 10a: **the SASL injection site is now one place, and it is the
-  place the keyring replaces.** `run()` in `crates/supernaut/src/session.rs`
-  mutates `networks[&network].connection.sasl` *after* `Config::into_networks`
-  lowers it as `None` — config has no credential surface to lower from, by
-  design. The keyring reads the account name from config and the secret from the
-  keyring, then writes that same field: the shape does not move, only where the
-  two halves come from. `into_networks` in
-  `crates/havoc-core/src/config.rs` must keep lowering `sasl: None`.
-- From prompt 10a: **`sasl_account` must leave the credential-shaped-key refusal
-  list and enter the schema in one commit.** `CREDENTIAL_KEYS` in
-  `crates/havoc-core/src/config.rs` refuses `password`/`pass`/`sasl_password`/
-  `nickserv_password` *by name*, and `#[serde(deny_unknown_fields)]` refuses
-  everything else — so adding an account-name key to `NetworkEntry` without the
-  same commit's test update fails loudly rather than silently, which is the
-  point. Do not add `sasl_account` to the refusal list "for symmetry": an
-  account name is not a secret, and the refusal message says credentials, which
-  would then be a lie.
-- From prompt 10a: **key keyring entries by the config network *name*, never by
-  `NetworkId`.** `Config::into_networks` in `crates/havoc-core/src/config.rs`
-  numbers networks `1..N` from the `BTreeMap`'s sorted order, so adding
-  `[networks.aardvark]` renumbers every network after it. That is unobservable
-  today *only* because nothing persists a wire id — and a keyring entry keyed by
-  `NetworkId` would be the first thing that did, silently re-pointing one
-  network's credentials at another's after an unrelated config edit. The name is
-  the stable key; it is what storage keys on too.
-- From prompt 10a: **resolve the secret for the selected network only.** The
-  injection site in `crates/supernaut/src/session.rs` mutates
-  `networks.get_mut(&network)` *after* lowering, but the map deliberately holds
-  every configured network (§6.9's actor map). A keyring pass that walks the whole
-  map unlocks — or prompts for — secrets belonging to networks this process will
-  never dial, which is both a bad prompt and a wider blast radius than the session
-  needs.
-- From prompt 10a: **the live-run credential surface is two lines, and
-  `write_config` is fixed-shape.** `scripts/live-run.sh` passes
-  `SUPERNAUT_SASL_PASSWORD="$FAKE_PASS"` and `--sasl alice` on session A only, and
-  its `write_config` helper always emits exactly host/port/tls_ca (+ optional
-  autojoin) — there is no way to generate a config carrying an account key.
-  Deleting the env bridge means *extending the helper*, not just editing A's
-  invocation. Fixture credentials stay recognisably fake (CLAUDE.md).
-- From prompt 10a: **the stage-1 acceptance run against a real network now needs a
-  hand-written config in an isolated `SUPERNAUT_CONFIG_DIR`.**
-  `--host`/`--port`/`--nick`/`--join`/`--tls-ca` no longer exist and there is
-  deliberately no `--config` flag, so `supernaut session` against Libera.Chat is
-  not a one-liner any more. Budget that as an explicit step of the acceptance run
-  rather than discovering it at the end of the stage.
+- **PLAN item 10 and §5.8 both promise "`keyring` with encrypted-file fallback"; this
+  prompt ships the keyring half only, deliberately.** A fallback file needs a key, and
+  every honest answer to "from where" is out of stage 1's reach: a passphrase needs a
+  no-echo prompt (the terminal is stage 2's, item 7), and a KDF + AEAD pair
+  (`argon2` + `chacha20poly1305`) is two dependencies off the allowlist bought for a
+  consumer that does not exist — the dogfood machine is a Mac with a working login
+  keychain. The off-the-shelf option was checked and is worse, not better:
+  keyring 4's `db-keystore` store is Turso-backed (a *second* SQLite implementation
+  beside rusqlite) and still takes its data-encryption key as a hex string from the
+  application, so the key problem is unsolved and the dependency is large. A file
+  "encrypted" with a key stored beside it is obfuscation labelled encryption, which is
+  worse than no fallback because it reads as safe. What ships instead is a loud
+  unavailability error (below) that names the deferral, so the gap is spoken rather
+  than discovered. Amend PLAN stage 1 item 10's wording in this PR — a stale doc is
+  fixed in the commit that stales it — and file the fallback as a carry-forward note on
+  **PLAN stage 4 item 3** (a daemon started at login on a box with a locked Secret
+  Service is its first real consumer), with stage 6 item 3 (Release) as the deadline,
+  since that is where "runs on Linux" becomes a user promise. One decision entry, with
+  the trigger to revisit stated: the first target without a working platform store.
+- **Stage 1's "Done when" requires SASL against Libera.Chat; whether a registered
+  Libera account exists is the user's call, not this session's.** Prompt 6 set the
+  precedent and recorded the honest entry ("TLS + registration verified, SASL
+  ergo-only"). The coordinator has answered for this run: no account exists, so the
+  Libera leg is TLS-without-SASL, SASL-from-the-keyring is proven against ergo in the
+  scripted run, and BUILD-LOG's Live run section says exactly that — the stage closes
+  with a named gap rather than a claimed run.
+- **The status bump to 12/12 mechanically fuses the stage retrospective into this
+  prompt's PR.** Check 10 in scripts/check-docs.sh fails every commit once
+  `**Status:** 12/12` is true and `## Retrospective — Stage 1` is absent, and check 6
+  ties the README's ✅ row count to the same number — so there is no green state in
+  which 10b is merged, the README says done, and the retrospective is still owed.
+  Decided: **the bump, the README row, and the retrospective entry are the last commit
+  of this PR**, with the cold-start drill dispatched against the finished branch (it has
+  every file the fresh sub-agent should see). The alternative — leave the status at
+  11/12 and open a second `stage-1-retrospective` PR carrying bump + README +
+  retrospective — is rejected because it parks the repo in a state where the queue says
+  "Next: prompt 10b" over merged 10b code, which is precisely the lie the cold-start
+  drill exists to catch. The retrospective is still stage-boundary work with its own
+  five sections (template in BUILD-LOG.md); it is not this prompt's work, it merely
+  rides this prompt's PR.
+- **"Kill and restart the process losing nothing" meets the ~100ms batch timer.** Writes
+  are batched (prompt 7), so `kill -9` can lose the batch in flight. Do not quietly
+  redefine the promise: in the acceptance run, record the row count observed before the
+  kill and the count read out of sqlite3 after the restart, and state the difference —
+  zero, or at most one in-flight batch, whichever was actually measured.
+
+The work:
+
+- **Config gains exactly one credential-adjacent key: `sasl_account`.**
+  `NetworkEntry` in crates/havoc-core/src/config.rs takes
+  `pub sasl_account: Option<String>` — "authenticate with SASL PLAIN as this account;
+  the secret comes from the credential store, keyed by this network's name". Add it to
+  the module-doc schema block in the same edit, and **do not add it to
+  `CREDENTIAL_KEYS`**: an account name is not a secret, and that list's message says
+  credentials, which would then be a lie (carry-forward). The list's four names stay,
+  and its message gets one sentence upgraded from aspiration to instruction — it now
+  names the replacement: set `sasl_account` here and run
+  `supernaut credential set <network>`. `deny_unknown_fields` means the schema addition
+  and the refusal-list tests move in one commit, which is the point: the tests in
+  crates/havoc-core/tests/config.rs must be updated in this commit or the build says so
+  loudly.
+- **Validation, stating the boundary rather than the exclusion** (prompt 10a's Learned
+  (2)): do **not** police what a network permits as an account name — that is the
+  network's business and we would be guessing, exactly as with channel names. What is
+  ours is the payload we frame: SASL PLAIN sends `authcid\0authcid\0password`, so a NUL
+  or control character in the account splits or corrupts our own payload, and
+  whitespace is a quoting mistake we can name for free. Refuse empty-after-trim,
+  whitespace, and control characters, with the message naming the network and the key.
+- **`sasl_account` together with `plaintext = true` is a config error.** SASL PLAIN puts
+  the password on the wire in cleartext; the loopback-only rule bounds the exposure to
+  the box, but §2.3's whole shape is that you say what you trust and never switch trust
+  off — and 10a's review flagged this pairing under the old `--sasl` flag. The refusal
+  names both keys and says the mechanism sends the secret in cleartext. It is stricter
+  than §2.3 demands, like the loopback rule beside it, so it travels as a carry-forward
+  note to PLAN stage 2 item 7 where the plaintext-LAN user first appears and it becomes
+  a product call.
+- **A credential store module in the binary, not in havoc-core:**
+  crates/supernaut/src/credentials.rs, with `keyring = "4.1.6"` (default features —
+  `default = ["v1"]`) declared in crates/supernaut/Cargo.toml. `keyring` is already on
+  DEP_ALLOWLIST, so no allowlist edit and no scripts/test-checks.sh fixture is owed; a
+  decision entry is, for two rejected alternatives. (1) *havoc-core owning the store* —
+  rejected: core's tests would depend on the developer's login keychain and on OS state,
+  and the credential store is an OS integration belonging to whichever process
+  assembles the core (today `supernaut`, at stage 4 `havocd` — a binary either way).
+  The type that crosses the seam is already `SaslCredentials`, which core owns.
+  (2) *`keyring-core` + `apple-native-keyring-store` directly* — rejected because we
+  want precisely the platform default, the store crates are target-gated so a Mac build
+  compiles only the Apple one, and `keyring` is the name already on the allowlist. The
+  trigger to revisit is the day we need a *non*-default store — which is the deferred
+  file fallback, and is exactly what keyring-core exists for.
+- **Keyed by service `"supernaut"` and user = the config network *name*.** Never
+  `NetworkId` (carry-forward: `into_networks` renumbers `1..N` from sorted order, so a
+  keyring entry keyed by id would be the first thing to persist a wire id and would
+  silently re-point one network's credentials at another's after an unrelated config
+  edit). Not `<network>:<account>` either: one entry per network is the minimum
+  ambiguity, `credential set <network>` then needs no account argument because config
+  already holds it, and editing `sasl_account` does not silently orphan a secret you
+  set five minutes ago — a mismatched account fails loudly at the server instead, which
+  is fail-closed and honest. Record the rejected alternative. Say out loud in the
+  module doc what this costs: one keychain namespace is shared by every
+  `SUPERNAUT_CONFIG_DIR`, so a network named `liverun` in two config dirs is one
+  secret. Hashing the config path into the service string would fix that and make the
+  entry unfindable in Keychain Access and unshareable with stage 4's daemon — rejected.
+- **`supernaut credential set <network>`**, a second `Command` variant in
+  crates/supernaut/src/main.rs, reading the secret from **stdin only**. Never argv:
+  `ps` is world-readable, which is the reason prompt 6 refused `--sasl-pass`. It
+  resolves the config file the same way `session` does and refuses a network the file
+  does not name, reusing `resolve_network` from session.rs (make it `pub(crate)`) so
+  there is one such sentence in the binary; it refuses a network with no `sasl_account`
+  ("add it first, or the secret would never be read"); it refuses an empty secret; it
+  trims exactly one trailing newline and nothing else; and it prints one confirmation
+  line naming service and account and **never the secret**. When stdin is a TTY it
+  prints one stderr line saying the input is not hidden — suppressing echo means either
+  a new dependency or raw-mode terminal code, and the terminal belongs to stage 2 item
+  7's first-run, which is where the no-echo prompt is filed as a carry-forward note.
+- **The lookup replaces the env read at the one existing injection site**, `run()` in
+  crates/supernaut/src/session.rs, after lowering (carry-forward: the shape does not
+  move, only where the two halves come from; `into_networks` keeps lowering
+  `sasl: None`, because config still has no secret to lower). Note the ordering trap:
+  `into_networks` consumes the config, so capture
+  `config.networks.get(&selected).and_then(|e| e.sasl_account.clone())` *before* it.
+  Resolve for the **selected network only** (carry-forward) — the map deliberately
+  holds every configured network, and walking it would touch the keychain for networks
+  this process will never dial; leave a comment saying so, or someone will "fix" it into
+  a loop. When there is no `sasl_account`, do not touch the keychain at all: sessions
+  B–E of the live run must be keychain-free. `mechanisms` stays hardcoded
+  `vec![SaslMechanism::Plain]`: a mechanism list in config is a knob with one legal
+  value until stage 6's CertFP.
+- **Three distinct failures, all before anything dials, all non-zero exits.** (1) Config
+  names an account and the store has no entry (`keyring::Error::NoEntry`): name the
+  service, the account, and the literal `supernaut credential set <network>` to run.
+  (2) The store itself is unavailable (any other error): say the OS keyring is
+  unavailable, quote the platform error, and say there is no encrypted-file fallback
+  yet, naming the PLAN deferral — a Linux headless user must get the true sentence, not
+  "no secret". (3) `Ambiguous`: two matching items exist — say which service/account
+  pair to de-duplicate in Keychain Access. Verify the variant names against the
+  keyring 4.1.6 docs rather than from memory; the `v1` module re-exports keyring-core's
+  `Error`.
+- **`--sasl` and `SUPERNAUT_SASL_PASSWORD` are both deleted**, not deprecated
+  (carry-forward, and 10a's precedent for the six connection flags): a fallback is what
+  keeps live-run.sh exercising the fallback and leaves the real surface decorative. No
+  env knob replaces it — a secret in the environment is the same plaintext §5.8 forbids
+  in the file, visible in `ps eww`, and inherited by every child. Update session.rs's
+  module doc in the same commit: it currently promises this prompt's keyring by name.
+- **Redact the outbound AUTHENTICATE payload in the IRC trace.**
+  crates/havoc-core/src/connection/actor.rs `eprintln!(">> {line}")`s every line it
+  writes, so `--trace-irc` today prints the base64 SASL payload — the secret, base64 is
+  not redaction — and scripts/live-run.sh copies that trace to `.cache/last-a.trace`,
+  i.e. it persists outside `$WORK`. Add a small helper applied at the outbound trace
+  sites: a line whose command is `AUTHENTICATE` and whose argument is neither `+` nor a
+  `SaslMechanism::as_str()` name prints as `AUTHENTICATE <redacted>`. At the trace only
+  — never at `send_line`, or the state-machine corpus in
+  crates/havoc-core/tests/state_machine.rs (which asserts the real payload from the
+  hand-written `sesame` fixture) breaks, correctly. Unit-test the helper in actor.rs's
+  existing `#[cfg(test)]` module: mechanism line untouched, `+` untouched, payload
+  redacted, `PRIVMSG` untouched. Inbound stays verbatim: what we read is a server
+  challenge, never our password.
+- **scripts/live-run.sh: the harness's own credential, and this is the hard part.**
+  `write_config` is fixed-shape (carry-forward), so extend it with a fifth optional
+  `sasl_account` argument emitted from an `if` block — never a trailing `[ -n … ] &&`
+  test, which under `set -e` makes an absent value the function's failing last command
+  (the comment already there says why). Session A's config gains
+  `sasl_account = "alice"`; its `--sasl alice` and `SUPERNAUT_SASL_PASSWORD` go. Getting
+  `$FAKE_PASS` into the store, in order, after `cargo build` and before A launches:
+  (1) `security delete-generic-password -s supernaut -a liverun` guarded with `|| true`,
+  clearing any item left by a previous build — the debug binary is ad-hoc signed, so its
+  cdhash changes every rebuild, and a keychain item whose ACL names last week's build is
+  what turns A's read into a GUI prompt, i.e. a hang; (2)
+  `printf '%s' "$FAKE_PASS" | "$BIN" credential set liverun` with
+  `SUPERNAUT_CONFIG_DIR="$WORK/config-a"`, so the item is created by the very binary
+  that will read it; (3) the same `delete-generic-password` in `cleanup()`, before the
+  `KEEP_WORK` early return — the harness leaves no credential behind, kept or not. Wrap
+  every `security` call and the `credential set` in a bounded watchdog helper (background
+  the command, kill it after ~10s, fail loudly) because this script must never sleep and
+  must never hang: a keychain dialog is invisible in CI and indistinguishable from a
+  deadlock. Extend the existing "session A never autojoined" failure message to name the
+  keychain as a candidate cause. The header comment must state plainly what the run does
+  to the machine: it creates and removes one generic-password item, service `supernaut`,
+  account `liverun`, holding the recognisably-fake `fake-livetest-passw0rd`, in the
+  **login** keychain — because keyring's macOS store uses the User keychain by default
+  and pointing it elsewhere needs the rejected keyring-core route. `security … -g` is
+  never used anywhere: it prints the secret.
+  **The one unverified assumption, to be settled by running it and recorded either way:**
+  whether `security delete-generic-password` on an item created by another application
+  prompts for authorization. If it does, the documented fallback is to seed with
+  `security add-generic-password -A -U -s supernaut -a liverun -w "$FAKE_PASS"` (`-A`
+  grants every application access without a dialog) at the cost of not exercising the
+  product's own write path in the harness. Primary is the product path; whichever ran
+  goes in BUILD-LOG's Learned with what was observed.
+- **New live-run assertions**, beside the ones prompt 6 left in place (`>> AUTHENTICATE
+  PLAIN` and the `903` line both stay — they are the regression net proving the keyring
+  produced a real credential): `a.trace` contains `AUTHENTICATE <redacted>`; and neither
+  `$FAKE_PASS` nor its PLAIN payload (`printf 'alice\0alice\0%s' "$FAKE_PASS" | base64`)
+  appears anywhere in `a.trace`, `a.out`, or the copied `.cache/last-a.trace`. That last
+  one is CLAUDE.md's never-in-logs rule made mechanical for two lines of shell.
+- **The stage acceptance run against Libera.Chat, by hand, budgeted as its own step**
+  (carry-forward: with the six flags gone and no `--config` flag by design, this is not a
+  one-liner). In order: export `SUPERNAUT_CONFIG_DIR=$(mktemp -d)` and hand-write
+  `config.toml` — `nick`, one `[networks.libera]` table with `host = "irc.libera.chat"`
+  and no `port`, no `tls_ca`, no `plaintext` (6697 and webpki-roots are the defaults
+  being proven), `autojoin` naming two channels: one quiet, one busy enough to produce
+  inbound lines within a minute, which is what "watches traffic land" actually requires
+  — do not speak in the busy one. Then (per the coordinator's Libera decision) no
+  `sasl_account` and the honest entry. Then
+  `supernaut session --network libera --data-dir <tmp>`: `connect`,
+  `wait registered 30`, watch both channels arrive from autojoin with no `join` typed,
+  `wait rows <quiet> 1 60`, `wait message <busy> 20 120`, and note the row count. Then
+  `kill -9` the process from another terminal — SIGKILL, not `quit`; the Done-when says
+  kill — and restart the identical command over the same `--data-dir`: the attach
+  announcement resolves both buffers (`wait buffer <busy>`), `backlog <busy> after:0 50`
+  reads lines written by the dead process, `search <token>`, `search from:<nick>
+  <token>` and `search in:<busy> "<phrase>"` return hits with wall time recorded, and
+  `sqlite3` row counts reconcile with the pre-kill number per the fourth conflict above.
+  That whole sequence, verbatim as observed, is what BUILD-LOG's Live run section holds
+  for this prompt; it is the stage's Done-when, run rather than asserted.
+- **Docs that this change stales, fixed in the same commits:** session.rs's module doc
+  and `SessionArgs` docs; config.rs's schema block, `CREDENTIAL_KEYS` comment and
+  `into_networks`' `sasl: None` note (which should now say where the secret comes from);
+  PLAN stage 1 item 10's fallback wording; PLAN stage 2 item 7 and stage 4 item 3
+  carry-forward notes; the queue's status line and README's badge plus the 10b row,
+  together, in the retrospective commit.
+- **Decision entries owed in BUILD-LOG.md**, one per rejected alternative, written when
+  the choice is made and not at the end: the keyring dependency (version, `v1` feature,
+  and both rejected store routes); the encrypted-file deferral; keying by network name
+  alone; stdin-with-echo over a no-echo prompt; and `sasl_account` + `plaintext` as a
+  refusal.
+- **Budget.** Estimate ~250 changed lines in `crates/` — config.rs and its tests are the
+  bulk, credentials.rs is ~90, session.rs shrinks — against the 800-line tripwire, so
+  nothing is planned to trail. If it somehow doubles, the only trailable item is
+  `credential set`'s refusal when `sasl_account` is missing (a nicety: without it the
+  stored secret merely goes unread), and it is deliberately kept **out** of the
+  Acceptance paragraph so that trailing it cannot contradict a step that must happen —
+  10a's Learned (1). Watch the ratchets: `longest-file` ceiling is 400 and
+  tests/config.rs is already 317; if it crosses, split the test file, because raising a
+  ceiling is a decision entry, not a convenience.
+
+Acceptance: with `SUPERNAUT_CONFIG_DIR` pointed at a scratch directory, add
+`sasl_account = "alice"` to a config naming the local ergo, run `supernaut session` and
+watch it refuse to dial at all — the error naming service `supernaut`, account
+`liverun`, and the exact `supernaut credential set liverun` to run; pipe a fake password
+into that command and read back one confirmation line that names the entry and not the
+secret; run the session again and watch it register with SASL. Set `plaintext = true`
+beside the account key and watch `config::parse` refuse the pair by name before anything
+dials. Then run scripts/live-run.sh: session A authenticates with a credential that
+exists nowhere in its config, its argv or its environment — `>> AUTHENTICATE PLAIN` and
+the `903` line still in a.trace, with the payload line now reading
+`AUTHENTICATE <redacted>` and neither the fake password nor its base64 anywhere in
+a.trace, a.out or .cache/last-a.trace — every other session runs without touching the
+keychain, and the run leaves no keychain item behind (`security find-generic-password -s
+supernaut -a liverun` finds nothing afterwards). Then the stage itself, by hand against
+Libera.Chat from a config file alone: connect over TLS on the stock root store, land in
+two channels nobody typed a `join` for, watch real traffic accumulate, `kill -9` the
+process, restart it over the same data dir, and read the dead process's lines back out
+of `backlog` and out of `search` with `from:`, `in:` and a phrase — with the row counts
+before and after, the search wall time, and the SASL-at-Libera outcome recorded in
+BUILD-LOG's Live run section as observed rather than as hoped. cargo test --workspace
+and make check green, ratchets not worsened, and the final commit carries
+`**Status:** 12/12`, the README row, and the `## Retrospective — Stage 1` entry whose
+cold-start drill ran against this branch.
+
+Do not: implement the encrypted-file fallback (deferred with its reasoning above and
+filed on PLAN stage 4 item 3 — the boundary is that *absence must be loud*: the
+store-unavailable error naming the deferral is required here, only the file is not);
+add a second credential store of any kind, including an env-var or file store gated
+behind a variable "for the harness" (that resurrects the deleted bridge under a new
+name, and a path only the harness takes is a path the product never proves — the harness
+uses the product's own `credential set`); add `credential get`, `credential status`, or
+any verb that prints or checks a secret (a `get` prints what CLAUDE.md forbids printing,
+and the session's own startup error is already the diagnostic; `rm`/`rotate` arrive when
+a person needs them, not before); prompt interactively for a password, or suppress
+terminal echo (the terminal is stage 2 item 7's, where the first-run wizard owns
+credential entry; stdin is the seam that works for both a human and a pipe);
+put a password, or anything that could hold one, into the config schema — `sasl_account`
+is a name, `CREDENTIAL_KEYS` keeps refusing the four secret-shaped keys by name, and the
+TOML serializer is still not compiled into havoc-core; add `sasl_account` to
+`CREDENTIAL_KEYS` "for symmetry" (the message says credentials; an account name is not
+one, and the lie would be in the error a user reads); keep `--sasl` or
+`SUPERNAUT_SASL_PASSWORD` in any form (replace, don't deprecate — and one surface means
+live-run.sh can only exercise the real one); walk the network map resolving secrets
+(§6.9's map holds every configured network; the selected one is the only one this process
+will dial, and the rest are somebody else's prompt); key anything in the keyring by
+`NetworkId` (derived ids renumber on an unrelated config edit; the name is what storage
+keys on too); add a mechanism key, SASL EXTERNAL, or CertFP (the mechanism list is shape
+only until stage 6's menu item, which budgets the machine work); touch the connect-time
+SASL failure policy in crates/havoc-core/src/connection/actor.rs (fail-closed, reported
+once, never retried — prompt 6's design, unchanged by where the password came from, and
+a keyring that retried on 904 would turn a wrong password into a lockout); redact at
+`send_line` rather than at the trace (the wire must still carry the real payload, and
+the corpus asserts it); autoconnect a configured network (stage 2's embedded wiring, and
+its early-quit hazard is already noted there); change the wire — PROTOCOL_VERSION stays
+1, no Request/Response/Event variant added or altered; touch the storage schema or add a
+migration (no credential ever goes near the database, which is the §5.8 rule the
+schema's absence of a column enforces); add platform detection to live-run.sh (still the
+dogfood Mac, still waiting on CI); and add any dependency beyond `keyring` in
+crates/supernaut.
+```
+
+**Status:** complete. Shipped per the JIT detail: `sasl_account` is the only
+credential-adjacent config key, the secret lives in the OS keyring keyed by the network's
+name, `supernaut credential set <network>` reads it from stdin only, and `--sasl` plus the
+`SUPERNAUT_SASL_PASSWORD` bridge are deleted rather than deprecated. Two deviations are
+recorded in the log entry: the encrypted-file half of §5.8 is deferred to PLAN stage 4
+item 3 with the store-unavailable error naming the deferral out loud, and **the stage
+acceptance run ran against OFTC, not Libera.Chat**, because Libera network-banned this IP
+mid-prompt — so the Done-when's SASL clause closes with a named gap (no registered
+account; OFTC advertises no `sasl` at all; keyring-SASL is proven against ergo on every
+live run) rather than a claimed run. Deliberately left untested: the `Ambiguous` keyring
+arm, which only the secret-service store can construct and which therefore cannot fire on
+the dogfood platform at all.
 
 ---
 

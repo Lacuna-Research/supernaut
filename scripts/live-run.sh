@@ -12,6 +12,18 @@
 # is no --host, --port, --nick, --join, --tls-ca or --allow-plaintext flag left to
 # pass: the connection surface is the TOML file, so this script exercises the
 # surface every later stage builds on rather than a parallel flags path.
+#
+# WHAT THIS DOES TO YOUR MACHINE, stated plainly (prompt 10b): everything else
+# lives in $WORK, but the credential cannot. This run creates — and then removes,
+# kept artifacts or not — exactly one generic-password item in your **login**
+# keychain: service `supernaut`, account `liverun`, holding the recognisably-fake
+# password `fake-livetest-passw0rd`. keyring's macOS store writes to the User
+# keychain and pointing it at a scratch keychain would need the keyring-core
+# route prompt 10b rejected, so there is nowhere else to put it. The item is
+# created by `supernaut credential set` — the product's own write path, not a
+# `security add-generic-password` shortcut — because a path only the harness
+# takes is a path the product never proves. `security ... -g` appears nowhere in
+# this file: it prints the secret.
 set -euo pipefail
 # A dead session A must fail an assert, not kill this script: ignore SIGPIPE
 # so fifo writes return EPIPE (caught by || true) instead of terminating bash
@@ -56,9 +68,67 @@ TLS_PORT=$((PORT + 1))
 ERGO_PID=""
 A_PID=""
 
+# Every keychain touch runs under a bounded watchdog. A macOS authorization
+# dialog is invisible from a script and indistinguishable from a deadlock, and
+# this script must never sleep and never hang — so a stall becomes a loud line
+# and a killed child instead of a run that never ends.
+#
+# stdin is an explicit argument because bash redirects an asynchronous command's
+# stdin from /dev/null when job control is off, which would silently feed
+# `credential set` nothing at all.
+#
+# `quiet` is an argument rather than a redirection on the call, because
+# `with_watchdog … >/dev/null 2>&1` silences the *watchdog's own* FAIL line along
+# with the command's chatter — which is precisely the line that must survive, since
+# a stalled keychain call is invisible otherwise.
+#
+# Usage: with_watchdog <label> <seconds> <stdin-file> <quiet|loud> <command...>
+with_watchdog() {
+	local label=$1 secs=$2 stdin=$3 quiet=$4
+	shift 4
+	if [ "$quiet" = quiet ]; then
+		"$@" <"$stdin" >/dev/null 2>&1 &
+	else
+		"$@" <"$stdin" &
+	fi
+	local pid=$!
+	{
+		sleep "$secs"
+		if kill -0 "$pid" 2>/dev/null; then
+			echo "FAIL: $label did not finish in ${secs}s — a keychain authorization" \
+				"dialog looks exactly like this from a script" >&2
+			kill -9 "$pid" 2>/dev/null || true
+		fi
+	} &
+	local guard=$!
+	local status=0
+	wait "$pid" || status=$?
+	# Kill the guard's `sleep` as well as the subshell holding it: killing only the
+	# subshell leaves the sleep orphaned for up to $secs. Harmless either way (a
+	# late guard finds no such pid), but a script that must never sleep should not
+	# leave sleeps behind.
+	pkill -P "$guard" 2>/dev/null || true
+	kill "$guard" 2>/dev/null || true
+	wait "$guard" 2>/dev/null || true
+	return "$status"
+}
+
+# Best-effort, hence the `|| true`: run before seeding as well as in cleanup.
+# Before, because the debug binary is ad-hoc signed and its cdhash changes on
+# every rebuild — an item whose ACL names last week's build is exactly what turns
+# session A's read into a GUI prompt, i.e. a hang. After, because the harness
+# leaves no credential behind.
+keychain_forget() {
+	with_watchdog 'security delete-generic-password' 10 /dev/null quiet \
+		security delete-generic-password -s supernaut -a liverun || true
+}
+
 cleanup() {
 	[ -n "$A_PID" ] && kill "$A_PID" 2>/dev/null || true
 	[ -n "$ERGO_PID" ] && kill "$ERGO_PID" 2>/dev/null || true
+	# Before the KEEP_WORK early return: kept artifacts are for debugging, and a
+	# credential is not an artifact.
+	keychain_forget
 	if [ -n "${KEEP_WORK:-}" ]; then
 		echo "KEEP_WORK: artifacts left in $WORK" >&2
 		return
@@ -170,11 +240,15 @@ grep -qi 'Account created\|already registered' "$WORK/prereg.out" || {
 # The harness writes each session's config file; the program never does (the
 # 2026-08-10 config-vs-runtime-state decision, and the toml serializer is not
 # even compiled into havoc-core). Usage: write_config <dir> <nick> <network>
-# [autojoin]. The autojoin line is emitted from an `if` block, not a trailing
-# `[ -n ... ] &&` test — under `set -e` that would make an absent autojoin the
-# function's failing last command.
+# [autojoin] [sasl_account]. Both optional lines are emitted from an `if` block,
+# not a trailing `[ -n ... ] &&` test — under `set -e` that would make an absent
+# value the function's failing last command.
+#
+# `sasl_account` is the whole credential surface config has: a *name*. The
+# password is in the OS keyring, and this file has no way to write one there
+# other than running the product's own `credential set` (below).
 write_config() {
-	local dir=$1 nick=$2 network=$3 autojoin=${4:-}
+	local dir=$1 nick=$2 network=$3 autojoin=${4:-} sasl_account=${5:-}
 	mkdir -p "$dir"
 	{
 		printf '# Generated by scripts/live-run.sh. Seed data only.\n'
@@ -186,6 +260,9 @@ write_config() {
 		if [ -n "$autojoin" ]; then
 			printf 'autojoin = ["%s"]\n' "$autojoin"
 		fi
+		if [ -n "$sasl_account" ]; then
+			printf 'sasl_account = "%s"\n' "$sasl_account"
+		fi
 	} >"$dir/config.toml"
 }
 
@@ -195,10 +272,31 @@ write_config() {
 # arrive in prompt 7). The fifo keeps stdin open until we say quit. A passes
 # --network explicitly: the name `liverun` is the coupling session D's proof
 # rests on, so it is stated, not defaulted.
-write_config "$WORK/config-a" alice liverun '#supernaut'
+write_config "$WORK/config-a" alice liverun '#supernaut' alice
+
+# A's password reaches the keyring through the product's own write path, from
+# stdin — never argv (`ps` is world-readable) and never the environment (`ps eww`,
+# and every child inherits it), which is why the `--sasl` flag and the
+# SUPERNAUT_SASL_PASSWORD bridge are both gone rather than kept as a fallback.
+# After this, the credential exists in nothing A can see: not its config, not its
+# argv, not its environment.
+keychain_forget
+printf '%s' "$FAKE_PASS" >"$WORK/a.pass"
+SUPERNAUT_CONFIG_DIR="$WORK/config-a" with_watchdog \
+	'supernaut credential set liverun' 10 "$WORK/a.pass" loud \
+	"$BIN" credential set liverun || {
+	rm -f "$WORK/a.pass"
+	echo "FAIL: could not store session A's SASL password in the OS keyring" >&2
+	exit 1
+}
+# Immediately, on both paths: stdin needed a file, and a file holding the fake
+# password is the one artifact KEEP_WORK must not keep — the header promises the
+# credential lives in the keychain and nowhere else.
+rm -f "$WORK/a.pass"
+
 mkfifo "$WORK/a.in"
-SUPERNAUT_CONFIG_DIR="$WORK/config-a" SUPERNAUT_SASL_PASSWORD="$FAKE_PASS" \
-	"$BIN" session --network liverun --sasl alice \
+SUPERNAUT_CONFIG_DIR="$WORK/config-a" \
+	"$BIN" session --network liverun \
 	--trace-irc --data-dir "$WORK/data-a" \
 	<"$WORK/a.in" >"$WORK/a.out" 2>"$WORK/a.trace" &
 A_PID=$!
@@ -215,6 +313,9 @@ done
 grep -q 'waited rows #supernaut' "$WORK/a.out" || {
 	echo "FAIL: session A never autojoined; a.out:" >&2
 	cat "$WORK/a.out" >&2
+	echo "--- a.trace tail (A now refuses to dial at all if the keychain read fails:" >&2
+	echo "    a missing supernaut/liverun item, or an ACL naming an older build):" >&2
+	tail -5 "$WORK/a.trace" >&2
 	tail -5 "$WORK/ergo.log" >&2
 	exit 1
 }
@@ -426,8 +527,35 @@ assert "$WORK/a.out" 'event buffer-created .* name=#supernaut' 'A saw its buffer
 assert "$WORK/a.trace" '>> CAP LS 302' 'A trace captured the opening'
 assert "$WORK/a.trace" 'PRIVMSG #supernaut :the deployment failed' "B's send landed at A"
 assert "$WORK/b.out" 'event connection-state network=1 phase=registered' 'B registered'
+# These two stay from prompt 6, and are now the regression net proving the
+# *keyring* produced a real credential: the only place A's password came from is
+# the keychain item `credential set` wrote.
 assert "$WORK/a.trace" '903 .*uthentication successful' 'A authenticated via SASL (903)'
 assert "$WORK/a.trace" '>> AUTHENTICATE PLAIN' 'A offered SASL PLAIN'
+assert "$WORK/a.trace" '>> AUTHENTICATE <redacted>' 'the SASL payload was redacted in the trace'
+# CLAUDE.md's never-in-logs rule, made mechanical. The trace outlives $WORK (it
+# is copied to .cache/last-a.trace for the corpus harvest), so a base64 payload
+# in it would be a password persisted on disk — base64 is not redaction.
+# `\0alice\0…`, not `alice\0alice\0…`: SASL PLAIN is authzid NUL authcid NUL
+# password and `crates/havoc-core/src/connection/caps.rs` sends an *empty* authzid
+# (its own unit test pins `\0alice\0sesame`). The first version of this line used
+# the wrong framing, which made the assertion below inert — it was checking for a
+# string the program could never emit. Verified by breaking the redactor on purpose
+# and watching this fail.
+PLAIN_PAYLOAD=$(printf '\0alice\0%s' "$FAKE_PASS" | base64)
+for log in "$WORK/a.trace" "$WORK/a.out" .cache/last-a.trace; do
+	# The file must exist: `grep` on a missing path fails, which would otherwise
+	# read as "the secret is not in there" — a check that fails open, silently.
+	if [ ! -f "$log" ]; then
+		printf 'FAIL  %s (%s is missing)\n' 'no credential material in the log' "$log" >&2
+		fail=1
+	elif grep -qF "$FAKE_PASS" "$log" || grep -qF "$PLAIN_PAYLOAD" "$log"; then
+		printf 'FAIL  %s (%s)\n' 'no credential material in the log' "$log" >&2
+		fail=1
+	else
+		printf 'ok    %s (%s)\n' 'no credential material in the log' "$log"
+	fi
+done
 assert "$WORK/a.out" 'phase=disconnected' 'A saw the ergo restart'
 assert "$WORK/a.out" 'phase=connecting detail=retry' 'A retried through backoff'
 if [ "$(grep -c 'phase=registered' "$WORK/a.out")" -ge 2 ]; then
