@@ -2349,3 +2349,454 @@ ordering hazard the note is *about* survives 9b's change (the storage jobs behin
 announcement and the response still complete in their own order), so the note keeps its
 warning and loses its wrong mechanism, with a parenthetical saying it was corrected.
 Fixing a doc at the moment you touch it beats filing a ticket against yourself.
+
+## Decision — `keyring` 4.1.6 lives in the binary, at the platform default store
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/Cargo.toml`,
+`crates/supernaut/src/credentials.rs`
+
+**Chose:** `keyring = "4.1.6"` with default features (`default = ["v1"]`) declared in
+**`crates/supernaut`**, wrapped by a `credentials` module of ~140 lines. `keyring` was
+already on `DEP_ALLOWLIST` in `scripts/check-docs.sh`, seeded from NORTH-STAR §5, so no
+allowlist edit and therefore no `scripts/test-checks.sh` fixture is owed — the decision
+entry is.
+**Over:** (a) **havoc-core owning the store.** Rejected: core's test suite would then
+depend on the developer's login keychain and on OS state, which is the opposite of the
+"no file I/O, everything testable from a string" property `config.rs` was built for one
+prompt ago. A credential store is an OS integration belonging to whichever process
+assembles the core — today `supernaut`, at stage 4 `havocd`, a binary either way — and
+the type that crosses the seam, `SaslCredentials`, is already core's. (b) **`keyring-core`
+plus `apple-native-keyring-store` wired up directly.** Rejected because what we want is
+precisely the platform default, which is exactly what the `keyring` façade *is*; naming
+the store ourselves buys control we have no use for and a second thing to keep in step
+with the platform.
+**Because:** the seam is one function each way (`load`, `set`) over a stable façade, and
+the alternative that matters — a *non*-default store — is the deferred file fallback,
+which is what `keyring-core` exists for and where this gets revisited.
+**Measured, because the number is worse than the shape suggests:** `Cargo.lock` goes from
+**107 to 202 packages** — 95 new entries for a credential store — because keyring 4's
+`v1` feature enables *every* platform backend in the manifest and the gating is by target
+at build time, not by feature at resolve time. What actually compiles on
+`aarch64-apple-darwin` is eight crates: `keyring`, `keyring-core`,
+`apple-native-keyring-store`, `security-framework`, `security-framework-sys`,
+`core-foundation`, `core-foundation-sys`, plus `log` (and `bitflags`/`libc`, already in
+the tree). The other 87 — `zbus`, `secret-service`, `aes`, `num-bigint`, `async-io`,
+`regex`, `tracing`, `uuid`, `toml_edit` and the rest — are the Linux and Windows store
+backends and their transitive tails, resolved and locked but never built here. That is
+still real: a lock entry is a supply-chain surface, `cargo audit` reads it, and a CI
+runner on Linux *would* compile the zbus half. Recorded rather than glossed, because the
+tidy `cargo tree` for this target is the misleading view.
+**Revisit if:** we need a non-default store — the file fallback, a scratch keychain for
+CI, or a Linux target where the Secret Service is not the right answer. Then this becomes
+`keyring-core` plus exactly the stores we name, which also cuts the 95 lock entries down
+to the ones we use. A CI runner that builds on Linux is the other trigger: the compiled
+set there is the zbus tail, and it should be measured before it is trusted.
+
+## Decision — the encrypted-file credential fallback is deferred, and its absence is made loud
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`, `PLAN.md`
+stage 1 item 10 and stage 4 item 3
+
+**Chose:** ship the keyring half of §5.8's "keyring with encrypted-file fallback" only,
+and make the missing half speak: when the platform store is unavailable for any reason
+other than "no entry", `credentials::describe` says the OS keyring is unavailable, quotes
+the platform error, states that **there is no encrypted-file fallback yet**, and names
+the PLAN deferral by item. Filed on PLAN stage 4 item 3, due by stage 6 item 3.
+**Over:** (a) **building it now with `argon2` + `chacha20poly1305`.** Two dependencies off
+the allowlist, bought for a consumer that does not exist: the dogfood machine is a Mac
+with a working login keychain. (b) **keyring 4's own `db-keystore`.** Checked rather than
+assumed, and it is worse: it is Turso-backed — a *second* SQLite implementation beside
+rusqlite — and it still takes its data-encryption key as a hex string handed in by the
+application, so the key problem is exactly as unsolved and the dependency is far larger.
+(c) **a file "encrypted" with a key stored beside it.** Rejected as the worst of the
+three: obfuscation labelled encryption is worse than no fallback, because it reads as
+safe.
+**Because:** a fallback file needs a key, and every honest source of one is out of stage
+1's reach. A passphrase needs a no-echo prompt, and the terminal belongs to stage 2 item
+7; a machine-derived key is the obfuscation option; a key in another store is the store we
+are trying to substitute for. The boundary that keeps this honest is **absence must be
+loud** — the deferral is a sentence a user reads, not a gap they discover when SASL
+silently does not happen.
+**Revisit if:** the first target without a working platform store — which is exactly PLAN
+stage 4 item 3's daemon started at login against a locked Secret Service, or a headless
+Linux box. `keyring-core` with an explicit store is the route; the key's provenance is the
+design question, not the file format.
+
+## Decision — keyring entries are keyed by the config network name, and nothing else
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`
+
+**Chose:** service `"supernaut"`, account = the **config network's name** (`liverun`,
+`libera`), one entry per network.
+**Over:** (a) **`NetworkId`.** Rejected on the carry-forward's reasoning:
+`Config::into_networks` numbers networks `1..N` from `BTreeMap` order, so adding
+`[networks.aardvark]` renumbers everything after it. A keyring entry keyed by id would be
+the first thing in this program to persist a wire id, and it would silently re-point one
+network's credentials at another's after an edit that had nothing to do with credentials.
+(b) **`<network>:<account>`.** Rejected: it makes `credential set` need an account
+argument config already holds, and editing `sasl_account` would silently orphan the
+secret you stored five minutes ago. With the name alone, a mismatched account fails
+loudly at the server — fail-closed, and honest. (c) **hashing the config path into the
+service string.** Rejected, though it fixes a real cost.
+**Because:** the name is the stable key, and it is what storage keys on too, so there is
+one identity in the system rather than two. **What (c) would have fixed, said out loud in
+the module doc rather than left to be discovered:** the keychain namespace is
+process-global, so one `supernaut`/`liverun` item is shared by *every*
+`SUPERNAUT_CONFIG_DIR` on the machine — two config dirs naming a network `liverun` share
+one secret. The price of fixing it is an entry nobody can find in Keychain Access and
+nothing can share with stage 4's daemon, which is a worse trade for a single-user client.
+**Revisit if:** one machine ever runs two independent supernaut *installations* that must
+not see each other's credentials — a shared build box, or per-project config dirs holding
+different accounts on the same network. Then the service string grows a discriminator, and
+it should be human-readable (`supernaut:<profile>`), not a hash.
+
+## Decision — `credential set` reads stdin with echo on, rather than prompting
+
+**Date:** 2026-08-10  **Affects:** `crates/supernaut/src/credentials.rs`,
+`crates/supernaut/src/main.rs`, `PLAN.md` stage 2 item 7
+
+**Chose:** `supernaut credential set <network>` reads the secret from **stdin only**,
+trims exactly one trailing newline, refuses empty, and — when stdin is a TTY — prints one
+stderr line saying the input is not hidden and showing the pipe form.
+**Over:** (a) **argv (`--password`).** Never: `ps` is world-readable, which is the reason
+prompt 6 refused `--sasl-pass`. (b) **an interactive no-echo prompt**, either via a
+password-reading dependency or hand-rolled raw mode. Rejected for now. (c) an env var,
+which is what this prompt *deleted*.
+**Because:** stdin is the one seam that serves a human and a pipe identically, and it is
+what lets `scripts/live-run.sh` exercise the product's real write path instead of a
+harness-only shortcut. Suppressing echo is either a new dependency or raw-mode terminal
+code, and the terminal belongs to stage 2 item 7's first-run, which owns credential entry
+as a product experience. Shipping a half-hidden prompt now would put terminal code in the
+one binary that is supposed to have none. The TTY warning is the honest interim: the
+failure mode of a visible password is a person who does not know it was visible.
+**Revisit if:** stage 2 item 7 lands the first-run wizard — it adds a hidden prompt
+*beside* the pipe, and does not replace it; a pipe is how the next machine gets a
+credential without a human.
+
+## Decision — `sasl_account` beside `plaintext = true` is a config error, not a warning
+
+**Date:** 2026-08-10  **Affects:** `crates/havoc-core/src/config.rs`, `PLAN.md` stage 2
+item 7
+
+**Chose:** `Config::validate` refuses the pair by name, before anything dials, with a
+message that says SASL PLAIN puts the secret on the wire and plaintext leaves it
+readable.
+**Over:** a loud warning that still connects. Rejected.
+**Because:** §2.3's shape is that you say what you trust and never switch trust off, and
+this pairing does switch it off — it is the one combination where a *credential* is the
+thing exposed, so the loopback-only rule beside it bounds the blast radius to the box but
+does not make it fine. 10a's review flagged exactly this pairing under the old `--sasl`
+flag, when the flag made it a runtime accident; in config it is a written statement, and a
+written statement that leaks a password should not be honoured. A warning that connects is
+a warning nobody reads twice.
+**Revisit if:** stage 2 item 7 relaxes the loopback-only plaintext rule for a LAN
+bouncer — then a user authenticating to that bouncer is the real case, and the two rules
+must be decided together rather than one of them quietly outliving the other. Filed as a
+carry-forward note there naming both.
+
+## Decision — the stage-1 acceptance run moves to OFTC after Libera network-banned this IP
+
+**Date:** 2026-08-10  **Affects:** the prompt 10b entry below, `PLAN.md` stage 1
+Done-when and **Still open**, stage 3
+
+**Chose:** run stage 1's acceptance sequence against **OFTC** (`irc.oftc.net`, TLS 6697,
+stock webpki roots), and record the Libera clause of the Done-when as an open,
+user-owned gap.
+**Over:** (a) **retrying Libera.** Refused: mid-prompt, Libera answered
+`465 … You are banned from this server- Your bot is not permitted to connect to Libera
+Chat … (2026/8/11 02.58)` and closed the link. A ban is an instruction, not an error to
+work around, and the reconnect backoff knocking on it repeatedly is the specific harm to
+avoid — so the acceptance script gained a hard ban-guard that SIGKILLs the session on
+`465`/`464`/`ERROR` instead of letting the actor retry. (b) **appealing the ban** by
+mailing `bans@libera.chat`. Not ours to send: it is the user's identity, the user's IP and
+the user's relationship with a volunteer network. (c) **shopping for a third, busier
+network** until the search leg produced a stranger's chat line. Rejected after one
+substitution: each new connection from a freshly-banned IP with a realname that literally
+says "debug session" is another chance to get the user banned somewhere else, and the
+value of a second opinion is far below that cost. (d) **skipping the live acceptance run**
+and closing the stage on `scripts/live-run.sh` alone. Rejected outright — the whole point
+of the Done-when is a real network.
+**Because:** what the Done-when actually tests is TLS against a public network on the
+stock root store, autojoin from a config file, real traffic landing in SQLite, `kill -9`,
+restart over the same data dir, and search with filters over what the dead process wrote.
+OFTC proves all of that. It cannot prove SASL — it advertises no `sasl` capability at all
+— and neither could Libera without a registered account, so the SASL clause was
+unprovable at a public network in this session either way, which is why prompt 6's honest
+precedent (verify what ran, name what did not) is the one followed.
+**Revisit if:** the Still-open ban/account question is answered — then the acceptance
+sequence is re-run at Libera with SASL from the keyring, which is the one clause still
+owed, and it is a rerun of an existing script rather than new work.
+
+## Prompt 10b — Credentials and the stage acceptance run
+
+**Commit:** branch `prompt-10b-credentials` (PR open)  **Date:** 2026-08-10
+
+**Shipped:** the secret left the environment for the OS keychain. Config gains exactly
+one credential-adjacent key — `NetworkEntry::sasl_account`, an account *name* — and it is
+deliberately **not** on `CREDENTIAL_KEYS`, whose four names stay and whose message is
+upgraded from aspiration to instruction (it now names `sasl_account` and
+`supernaut credential set <network>`). Validation refuses empty-after-trim, whitespace and
+control characters in the account, stating the boundary rather than the exclusion: what a
+network permits as an account name is the network's business, but `authcid\0authcid\0
+password` is our payload to frame. `sasl_account` beside `plaintext = true` is a refusal,
+by name, before anything dials. New `crates/supernaut/src/credentials.rs` (138 lines) owns
+the store: `keyring = "4.1.6"`, service `"supernaut"`, account = the config network's
+*name*, `load` for the session and `set` for the new
+`supernaut credential set <network>` subcommand — stdin only, never argv, one trailing
+newline trimmed, empty refused, one confirmation line naming the entry and never the
+secret, and one stderr line when stdin is a TTY saying the input is not hidden. Three
+distinct failures, all before dialling and all non-zero: `NoEntry` names the service, the
+account and the exact command to run; `Ambiguous` says how many items to de-duplicate in
+Keychain Access; anything else says the keyring is unavailable, quotes the platform error,
+and names the deferred file fallback by PLAN item. `--sasl` and `SUPERNAUT_SASL_PASSWORD`
+are **deleted**, not deprecated, and `load_config` is lifted into main.rs so `session` and
+`credential set` say "cannot read config" identically. The lookup replaced the env read at
+the one existing injection site, for the **selected network only**, with the account name
+captured before `into_networks` consumes the config, and a comment saying why it is not a
+loop. `--trace-irc` no longer prints the SASL payload: a `redact_outbound` helper in
+`connection/actor.rs` turns `AUTHENTICATE <base64>` into `AUTHENTICATE <redacted>` at the
+three outbound trace sites — at the trace only, never at `send_line`, so the wire and the
+state-machine corpus are untouched. `scripts/live-run.sh` seeds and removes its own
+keychain item through the product's own write path under a bounded watchdog, and asserts
+that neither the fake password nor its base64 appears in `a.trace`, `a.out` or
+`.cache/last-a.trace`. No wire change (`PROTOCOL_VERSION` stays 1), no storage schema
+change, no migration. Six decisions above were made while doing this and are recorded
+there.
+
+**Deviations:** three, and the first is the one that matters.
+
+- **The stage acceptance run ran against OFTC, not Libera.Chat, because Libera
+  network-banned this IP mid-prompt.** Recorded as its own decision entry above, with the
+  four rejected alternatives (retry, appeal, shop for a third network, skip). The
+  coordinator had already settled that the Libera leg would be TLS-without-SASL, since no
+  registered account exists; the ban removed the host as well. `PLAN.md` stage 1's
+  Done-when now carries a paragraph naming exactly which clause went unproven, and
+  **Still open** carries the two user-owned questions (an account; the ban appeal).
+- **A sixth decision entry, and three PLAN notes the order did not name.** The order named
+  five decisions and three PLAN edits; the ban forced the sixth decision, and the
+  acceptance run itself surfaced two notes that are more valuable than anything the code
+  changed: stage 2 item 5 gets "on a network without `echo-message`, nothing you say is
+  ever stored" (observed, see Learned) and stage 3 gets "the USER realname is the const
+  `supernaut debug session`, and a real network read it as a bot and banned us".
+- **`scripts/live-run.sh`'s new never-in-logs loop got a file-existence check the order did
+  not ask for.** `grep -qF` on a missing path fails, and the loop read that as "the secret
+  is not in there" — a check that fails open, silently, which is the exact failure mode
+  CLAUDE.md's "a broken check fails open, and open is silent" names. Two lines, and the
+  reason is in a comment.
+
+**Deferred:** the encrypted-file fallback, with its own decision entry above, filed on
+PLAN stage 4 item 3 and due by stage 6 item 3; its absence is a sentence the user reads
+rather than a gap they discover. Nothing else from this prompt's scope was left undone —
+the trailable item in the budget (`credential set` refusing a network with no
+`sasl_account`) shipped, because the change came in at 313 lines against a cap of 800.
+
+**Learned:** four, in descending order of what they would have cost later.
+
+(1) **A real network's capability set is the thing that decides whether your own words
+exist.** OFTC answered `CAP * LS :multi-prefix` — one capability — so the client sent no
+`CAP REQ` at all, and the line it PRIVMSGed into its own channel is absent from `message`,
+from `backlog` and from `search`, while every inbound line the network sent landed and was
+searchable. Ingestion is inbound-only by design and `echo-message` is what makes our own
+text inbound; prompt 9b's carry-forward note said as much about *composer state*, and the
+consequence for *history* is a strictly bigger deal that nobody had written down. It cost
+this run its planned search corpus (the token line was never stored, so the first three
+searches came back `hits=0`) and it was recovered by searching what the network itself had
+sent — ChanServ's `#debian` welcome and the AUTH notices, real text written by the process
+that got killed. The general shape: **when a design says "the server tells us X", test
+against a server that does not.** Filed on PLAN stage 2 item 5 with stage 3 as the
+deadline.
+
+(2) **A ban is a measurement, and the thing it measured was our realname.** Libera's
+`465` says *"Your bot is not permitted to connect"*. Two candidate causes and both
+happened: a survey run that autojoined ten channels from one client, and a USER line whose
+realname is the const `"supernaut debug session"`. Prompt 10a carried that const verbatim
+on the reasoning that changing the USER line is "an observable protocol change with no
+benefit" — the benefit has now been supplied by a network refusing us. The transferable
+lesson is narrower than "be careful": **a string the program sends to strangers is not an
+implementation detail, and a placeholder in one is a promise to be misread.** Filed on
+PLAN stage 3, because a dogfood month cannot start on a network that bans you on day one.
+
+(3) **The keychain-ACL fear was unfounded, and settling it took one script.** The order
+flagged as unverified whether `security delete-generic-password` on an item created by
+*another* application (our ad-hoc-signed debug binary, whose cdhash changes every rebuild)
+prompts for authorization. It does not: probed in order, `delete` on nothing → exit 44,
+`credential set` → exit 0, `find` → exit 0, **`delete` on the product-created item → exit
+0, no dialog, no watchdog trip**, `find` again → exit 44. So the harness uses the product's
+own write path throughout and the documented `security add-generic-password -A` fallback
+was never needed. The watchdog stays anyway — it costs 20 lines and it is the difference
+between a loud failure and a CI run that hangs forever on an invisible dialog.
+
+(4) **95 lock entries for a credential store, 8 of them compiled.** Measured in the
+dependency decision above rather than discovered at audit time. `cargo tree` for this
+target shows a tidy eight-crate tail and is the misleading view; `Cargo.lock` nearly
+doubles, 107 → 202, because keyring 4's `v1` feature enables every platform backend in the
+manifest and gates them by *target* at build time rather than by *feature* at resolve time.
+The habit worth keeping: **for a new dependency, count the lock, not the tree.**
+
+**Measured:** 313 changed lines in `crates/` (271 added, 42 deleted) against the 800-line
+tripwire, and 1922 across the whole diff including `Cargo.lock`'s 95 new packages,
+`scripts/live-run.sh` and the docs. `cargo test --workspace`: **74 tests, all green**, up
+from 72 — three new in `tests/config.rs` (the PLAIN-payload validation, the
+`plaintext` pairing, and `sasl_account` pinned as *not* a credential key) and one in
+`actor.rs` (the redactor over four line shapes). Ratchets: `todo-count 0`,
+**`longest-file 399` against a ceiling of 400 — one line of headroom**, and the file at the
+wall is **`crates/havoc-core/src/connection/actor.rs`** (373 → 399; the 26 lines are the
+redactor and its test), not the test file the order expected to crack first
+(`crates/havoc-core/tests/config.rs`, 317 → 393, second at the wall; `session.rs` 355).
+Left at 400 rather than tightened to 399, because the value **worsened** and a ratchet only
+turns one way on an improvement — but the consequence is stated here so it is not a
+surprise: **the next prompt that adds a line to `actor.rs` fails `make check`, and the
+remedy is to split the file, not to raise the ceiling** (raising it is a decision entry).
+`redact_outbound` plus its test moving to a `connection/trace.rs` of their own is the
+obvious cut, and it was deliberately not made here — the order placed the helper and its
+test in `actor.rs`, and restructuring a module after the live runs and before the review is
+churn buying nothing this prompt needs. `credentials.rs` is 138 lines, `config.rs` 331. Clean `cargo build -p supernaut` after the dependency landed: 9.33s.
+
+**Live run:** four separate exercises, and the fourth did not go as planned.
+
+**1. `scripts/live-run.sh` — 46/46, exit 0, run twice** (up from 42; the four new
+assertions are the redaction line and the three never-in-logs files). Session A now
+authenticates with a credential that exists in nothing it can see: not its config (which
+holds `sasl_account = "alice"` and no secret), not its argv, not its environment. The
+regression net prompt 6 left in place still fires — `>> AUTHENTICATE PLAIN` and
+`903 … authentication successful` are both in `a.trace` — which is what proves the keyring
+produced a *real* credential rather than an empty string, and the payload line beside them
+now reads `>> AUTHENTICATE <redacted>`. Neither `fake-livetest-passw0rd` nor its
+`alice\0alice\0…` base64 appears in `a.trace`, `a.out` or `.cache/last-a.trace`. Sessions
+B–E never touch the keychain (no `sasl_account` in their configs), and after the run
+`security find-generic-password -s supernaut -a liverun` exits 44 — **the harness left no
+credential behind**, verified after both runs. `security … -g` appears nowhere in the
+repository.
+
+**2. The keychain-ACL probe** (`.cache/p10b/probe-keychain.sh`, gitignored): the five-step
+sequence in Learned (3), exit codes 44/0/0/0/44, no authorization dialog at any step, and
+the item confirmed to live in `~/Library/Keychains/login.keychain-db` — which is what the
+live-run header comment tells the reader it does to their machine.
+
+**3. The by-hand ergo acceptance, all four cases, isolated `SUPERNAUT_CONFIG_DIR`**
+(`.cache/p10b/byhand-ergo.sh`, gitignored), against a local ergo with a self-signed cert
+and `alice` pre-registered with NickServ. (1) A config naming `sasl_account = "alice"` with
+no keyring entry: **exit 1, nothing dialled**, and the message is
+*"no SASL password for network liverun: the OS keyring holds no item for service
+supernaut, account liverun. Store one: printf %s 'your-password' | supernaut credential set
+liverun"*. (2) `printf %s … | supernaut credential set liverun` → exit 0 and one line,
+*"stored a password in the OS keyring: service supernaut, account liverun (SASL account
+alice)"* — the entry named, the secret not. (3) The identical session command again: exit
+0, registered, autojoined, and the trace's SASL exchange verbatim —
+`>> AUTHENTICATE PLAIN`, `<< … AUTHENTICATE +`, `>> AUTHENTICATE <redacted>`,
+`<< … 900 … You are now logged in as alice`, `<< … 903 :Authentication successful` — with
+zero occurrences of the fake password or its base64 in either stdout or the trace. (4)
+`plaintext = true` beside the account key: **exit 1 from `config::parse`**, *"config:
+network liverun: `sasl_account` with `plaintext` would send the password in cleartext …
+Drop one of the two keys."* Then the keychain item removed, `find` exit 44.
+
+**4. The stage acceptance run — at OFTC, not Libera.Chat.** Libera first: with the
+hand-written config in a scratch `SUPERNAUT_CONFIG_DIR` and no `sasl_account`, the run got
+`<< :erbium.libera.chat 465 supernaut-smoke :You are banned from this server- Your bot is
+not permitted to connect to Libera Chat. Please email bans@libera.chat if you think this
+network ban was set in error. (2026/8/11 02.58)` followed by
+`<< ERROR :Closing Link: … (*** Banned )`. Not retried; see the decision entry and
+Learned (2). Substituted OFTC, one connection, two autojoin channels
+(`#supernaut-smoke` quiet, `#debian` busy), no speaking in the busy one, a short lurk, a
+clean quit, and a ban-guard that would SIGKILL on another refusal.
+
+- **Config, hand-written, verbatim:** `nick = "supernaut-smoke"`, one `[networks.oftc]`
+  table with `host = "irc.oftc.net"`, `autojoin = ["#supernaut-smoke", "#debian"]`. **No
+  `port`, no `tls_ca`, no `plaintext`, no `sasl_account`** — 6697 and the stock
+  webpki-roots store are the defaults being proven.
+- **Registered 12s after the process started**, TLS on the stock root store with no
+  configured anchor. Both autojoined channels had produced a stored row **0s later** —
+  neither `join` was ever typed. Five buffers appeared: `AUTH`, `CTCPServ`,
+  `#supernaut-smoke`, `#debian`, `ChanServ`.
+- **Traffic, as observed rather than as hoped:** across a 180s lurk, `#debian` produced
+  **zero** chat lines — 04:30 UTC in a support channel — and, per Learned (1), our own
+  PRIVMSG was never stored because OFTC advertises only `multi-prefix`. What *did* land was
+  real inbound text the network sent: four `AUTH` notices, ChanServ's `[#debian] Welcome to
+  #Debian…` notice, CTCPServ's `VERSION` request, our two joins and a `+n +t` mode line.
+  **9 rows, 9 `message-added` events, 5 storage commits.**
+- **`kill -9`, and the batch-timer question answered with a number:** `9` rows before the
+  kill (read by `sqlite3` from outside the process), `9` after. **Difference: 0 rows.** Not
+  "nothing was lost" as a promise — the measurement, on a run whose last write was ~2
+  minutes before the SIGKILL, which is exactly the case where a ~100ms batch timer has
+  nothing in flight. A kill mid-flood is still capable of losing one batch; this run had no
+  batch to lose, and that is what is claimed.
+- **Restart over the same `--data-dir`, identical command:** the attach announcement
+  resolved **all five** buffers before the process dialled anything, and
+  `backlog #debian after:0 50` / `backlog #supernaut-smoke after:0 50` read back lines
+  written by the dead process. The three planned searches returned `hits=0`, correctly and
+  for the reason above: the corpus held no chat text.
+- **The search leg, closed against the real text that did land** (`.cache/p10b/
+  oftc-phase3.sh`, gitignored) — a session over the same data dir with `connect` never
+  typed, so **`event connection-state` count 0: it dialled nothing**. Four searches over
+  what a real network wrote and a killed process stored: `search hostname` → **2 hits**
+  (`*** Looking up your hostname...`, `*** Couldn't look up your hostname`);
+  `search from:ChanServ Debian` → **1 hit** (the `#debian` welcome);
+  `search in:ChanServ "support channel"` → **1 hit**; `search in:AUTH "look up"` → **1
+  hit**, and notably not the `Looking up` line, which is FTS5 tokenisation being visible
+  rather than a bug. **Four searches, 0.036s wall time**, measured around the whole block.
+- **What could not be verified live, named rather than left implicit:** **SASL against a
+  public network.** OFTC advertises no `sasl` capability at all, and Libera would have
+  needed a registered account which does not exist — so the clause was unprovable at a
+  public network in this session by two independent causes. SASL from the keyring is
+  proven against local ergo, twice by hand and on every `scripts/live-run.sh` run, which
+  is the same honest shape prompt 6 recorded. Both halves of the gap are in PLAN's
+  **Still open** with the user named as their owner, and PLAN stage 1's Done-when now says
+  so in place.
+
+**Review:** pending.
+
+**Carry-forward consumed:** all seven notes attached to prompt 10b, deleted as one act
+with this entry.
+
+- *From prompt 6 (credentials half) — the env bridge must be deleted, not kept alongside.*
+  Done: `--sasl` and `SUPERNAUT_SASL_PASSWORD` are both gone from `session.rs`, the module
+  doc says why (a secret in the environment is the same plaintext §5.8 forbids in the
+  file, visible in `ps eww`, inherited by every child), and `scripts/live-run.sh` has no
+  other path to a credential — so the harness proves the real surface rather than a
+  fallback. Fixture credential is `fake-livetest-passw0rd`.
+- *From prompt 10a — the SASL injection site is one place, and it is the place the keyring
+  replaces.* Applied exactly: the shape did not move, only where the two halves come from.
+  `into_networks` still lowers `sasl: None` (its doc now says where the secret comes from
+  instead of merely that it is absent), and `run()` joins the account name from config to
+  `credentials::load`'s half after lowering.
+- *From prompt 10a — `sasl_account` must leave the refusal list and enter the schema in one
+  commit, and must not be added to that list "for symmetry".* Both halves done in this
+  commit, and the "for symmetry" trap is now **pinned** by
+  `sasl_account_is_not_treated_as_a_credential_key`, which also asserts the four secret
+  names still refuse beside it and that the refusal message names `credential set`. The
+  list's doc comment says why the account name is not on it: the message says credentials,
+  and the lie would be in the error a user reads.
+- *From prompt 10a — key entries by the config network name, never `NetworkId`.* Done, with
+  its own decision entry recording the two rejected alternatives and the cost of the one
+  chosen (one keychain namespace across every `SUPERNAUT_CONFIG_DIR`, said out loud in the
+  module doc).
+- *From prompt 10a — resolve the secret for the selected network only.* Done, with the
+  comment the note asked for so nobody "fixes" it into a loop over the map. Verified from
+  outside: live-run sessions B–E have no `sasl_account` and touch the keychain zero times.
+- *From prompt 10a — the live-run credential surface is two lines and `write_config` is
+  fixed-shape.* The helper gained a fifth optional `sasl_account` argument emitted from an
+  `if` block, never a trailing `[ -n … ] &&` test (which under `set -e` would make an
+  absent value the function's failing last command — the comment already there says why).
+  The credential now reaches the store through `"$BIN" credential set liverun` under a
+  watchdog, with `security delete-generic-password` before the seed and again in
+  `cleanup()` *before* the `KEEP_WORK` early return.
+- *From prompt 10a — the acceptance run needs a hand-written config in an isolated
+  `SUPERNAUT_CONFIG_DIR`, budgeted as its own step.* Budgeted, and the budget was the
+  right call: the step consumed a Libera ban, a network substitution, a capability
+  discovery and a third script. Had it been treated as a one-liner at the end of the
+  prompt it would have been discovered with no time left to be honest in.
+
+**Carry-forward raised:** none to a later prompt in `STAGE-1-PROMPTS.md` — 10b is the last
+prompt of stage 1, so every note goes to `PLAN.md` at the stage that will need it. **Five,
+all recorded above at the moment they were raised:** stage 2 item 5 (nothing you say is
+stored without `echo-message` — the history half of a note that previously existed only as
+a composer-state warning; deadline stage 3); stage 2 item 7 (two notes: there is no no-echo
+password prompt and this item owns the terminal that would give it one; `sasl_account` +
+`plaintext` is stricter than §2.3 asks and relaxing it is the same call as the loopback
+rule beside it); stage 3 (the USER realname is a const that says "debug session" and a real
+network read it as a bot); stage 4 item 3 (the encrypted-file fallback, with stage 6 item 3
+as the deadline and the requirement that `credentials.rs`'s error text be updated in the
+commit that closes it). Plus two entries on PLAN's **Still open** list, both user-owned and
+both marked *(not blocking)*: a registered account to prove SASL with, and the Libera ban
+appeal. None came from a harvest sub-agent — the post-prompt review has not run yet, and
+its findings will be dispositioned in an addendum below, as 9a, 9b and 10a did.

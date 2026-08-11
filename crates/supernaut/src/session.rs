@@ -13,13 +13,18 @@
 //! every later stage builds on — the decorative one. `connect` is still an
 //! explicit verb: nothing here autoconnects a configured network (stage 2's
 //! embedded wiring owns that).
+//!
+//! **Credentials come from the OS keyring** (prompt 10b): the config names the
+//! account, the keyring holds the secret, and the `--sasl` flag and the
+//! `SUPERNAUT_SASL_PASSWORD` env bridge are both deleted rather than deprecated —
+//! a secret in the environment is the same plaintext §5.8 forbids in the file,
+//! visible in `ps eww` and inherited by every child.
 
 use std::collections::HashMap;
-use std::path::Path;
 
 use havoc_core::config;
 use havoc_core::connection::io::Security;
-use havoc_core::connection::{SaslConfig, SaslCredentials, SaslMechanism};
+use havoc_core::connection::{SaslConfig, SaslMechanism};
 use havoc_core::core::Core;
 use havoc_core::storage::Storage;
 use havoc_ipc::{BufferId, ConnectionPhase, NetworkId, Request, RequestBody, RequestId, Seq};
@@ -36,11 +41,6 @@ pub struct SessionArgs {
     /// file names exactly one.
     #[arg(long)]
     pub network: Option<String>,
-    /// SASL PLAIN account. The password comes from SUPERNAUT_SASL_PASSWORD —
-    /// argv is world-readable in ps; env is the debug-grade bridge until
-    /// prompt 10b's keyring, which deletes both.
-    #[arg(long)]
-    pub sasl: Option<String>,
     /// Echo raw IRC lines (`>>`/`<<`) to stderr — the transcript capture.
     /// Diagnostics, not seed data, so it stays a flag.
     #[arg(long)]
@@ -52,19 +52,15 @@ pub struct SessionArgs {
 }
 
 pub async fn run(args: SessionArgs) -> Result<(), String> {
-    let config_path = crate::default_config_path()?;
-    let text = std::fs::read_to_string(&config_path).map_err(|e| {
-        format!(
-            "cannot read config {}: {e} — write the file, or point SUPERNAUT_CONFIG_DIR \
-             at the directory holding it",
-            config_path.display()
-        )
-    })?;
-    // `tls_ca` resolves against the file's own directory, so a generated
-    // fixture directory is portable.
-    let base_dir = config_path.parent().unwrap_or(Path::new("."));
-    let config = config::parse(&text, base_dir)?;
+    let config = crate::load_config()?;
     let selected = resolve_network(&config, args.network.as_deref())?;
+    // Captured **before** `into_networks` consumes the config, and for the
+    // selected network only: the account name is the half of the credential
+    // config holds (§5.8 keeps the other half out of the file entirely).
+    let sasl_account = config
+        .networks
+        .get(&selected)
+        .and_then(|entry| entry.sasl_account.clone());
 
     // Core is spawned with **every** configured network, not just the selected
     // one: that is the `HashMap<NetworkId, _>` §6.9 asks for, it costs nothing
@@ -97,23 +93,28 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
         Security::Tls { ca_file: None, .. } => {}
     }
 
-    // **The one SASL site, and the one prompt 10b replaces with the keyring.**
-    // Config lowers `sasl: None` always, because config has no credential
-    // surface to lower from (NORTH-STAR §5.8) — so the credentials are injected
-    // here, into the selected network only, after lowering.
-    if let Some(account) = &args.sasl {
-        let password = std::env::var("SUPERNAUT_SASL_PASSWORD")
-            .map_err(|_| "--sasl requires SUPERNAUT_SASL_PASSWORD in the environment".to_owned())?;
+    // **The one SASL site.** Config lowers `sasl: None` always, because config
+    // has no credential surface to lower from (NORTH-STAR §5.8) — so the two
+    // halves are joined here, after lowering: the account name from the config
+    // file, the secret from the OS keyring keyed by this network's *name*.
+    //
+    // The **selected network** only, and deliberately not a loop over the map:
+    // the map holds every configured network (§6.9), and walking it would touch
+    // the keychain for networks this process will never dial — a wider blast
+    // radius than the session needs, and on some platforms a dialog per entry.
+    // A missing keyring entry, or a keyring that is unavailable at all, fails
+    // here — before anything dials — with the message credentials.rs writes.
+    if let Some(account) = sasl_account {
+        let credentials = crate::credentials::load(&selected, &account)?;
         networks
             .get_mut(&network)
             .expect("selected network is in the map")
             .connection
             .sasl = Some(SaslConfig {
+            // Hardcoded until stage 6's CertFP: a mechanism list in config is a
+            // knob with exactly one legal value.
             mechanisms: vec![SaslMechanism::Plain],
-            credentials: SaslCredentials {
-                authcid: account.clone(),
-                password,
-            },
+            credentials,
         });
     }
 
@@ -137,7 +138,10 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
 /// `--network` is optional exactly when the file names one network; otherwise the
 /// error names the candidates, because "ambiguous" without the list is a second
 /// round trip through the user's own file.
-fn resolve_network(config: &config::Config, requested: Option<&str>) -> Result<String, String> {
+pub(crate) fn resolve_network(
+    config: &config::Config,
+    requested: Option<&str>,
+) -> Result<String, String> {
     // Non-empty by construction: `config::parse` refuses a file that names no
     // networks, with a message about the missing table rather than about this flag.
     let candidates: Vec<&str> = config.networks.keys().map(String::as_str).collect();

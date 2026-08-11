@@ -11,7 +11,32 @@ use havoc_ipc::{ConnectionPhase, NetworkId};
 use tokio::sync::mpsc;
 
 use super::io::{AnyLineTransport, LineTransport, Security};
-use super::{Config, Machine, State, ingest};
+use super::{Config, Machine, SaslMechanism, State, ingest};
+
+/// The outbound trace line, with the SASL payload taken out.
+///
+/// `--trace-irc` writes every line we send to stderr, and scripts/live-run.sh
+/// keeps a copy of that capture on disk — so without this the base64
+/// `AUTHENTICATE <payload>` line *is* the password in a log file, which is the
+/// one thing CLAUDE.md forbids outright. Base64 is not redaction.
+///
+/// Applied **at the trace only**, never at `send_line`: the wire must still carry
+/// the real payload, and tests/state_machine.rs asserts that it does.
+///
+/// `AUTHENTICATE PLAIN` (the mechanism offer) and `AUTHENTICATE +` (the empty
+/// response) carry nothing secret and pass through, so a trace still shows the
+/// exchange's shape and live-run can still assert on it. A mechanism added to
+/// [`SaslMechanism`] later would be over-redacted rather than leaked, which is
+/// the direction to fail in.
+fn redact_outbound(line: &str) -> &str {
+    let Some(argument) = line.strip_prefix("AUTHENTICATE ") else {
+        return line;
+    };
+    if argument == "+" || argument == SaslMechanism::Plain.as_str() {
+        return line;
+    }
+    "AUTHENTICATE <redacted>"
+}
 
 /// Commands the core sends its actor. **At-most-once, by decision** (prompt 9b):
 /// dropped while disconnected — autojoin re-fires on the fresh machine, and a
@@ -226,7 +251,7 @@ async fn attempt_once(
     let (mut machine, opening) = Machine::start(config);
     for line in opening {
         if trace {
-            eprintln!(">> {line}");
+            eprintln!(">> {}", redact_outbound(&line));
         }
         if transport.send_line(&line).await.is_err() {
             return Attempt::Lost {
@@ -276,7 +301,7 @@ async fn attempt_once(
                 let replies = machine.handle_message(&parsed);
                 for reply in replies {
                     if trace {
-                        eprintln!(">> {reply}");
+                        eprintln!(">> {}", redact_outbound(&reply));
                     }
                     if transport.send_line(&reply).await.is_err() {
                         return Attempt::Lost {
@@ -319,7 +344,10 @@ async fn attempt_once(
                     ActorCommand::Privmsg { target, text } => format!("PRIVMSG {target} :{text}"),
                 };
                 if trace {
-                    eprintln!(">> {line}");
+                    // No command can produce an AUTHENTICATE line today; the
+                    // redactor is applied anyway, so there is one outbound trace
+                    // rule rather than two sites to remember to keep in step.
+                    eprintln!(">> {}", redact_outbound(&line));
                 }
                 if transport.send_line(&line).await.is_err() {
                     return Attempt::Lost {
@@ -344,5 +372,28 @@ mod tests {
             );
             assert!(d <= std::time::Duration::from_secs(90), "cap at {attempt}");
         }
+    }
+
+    /// The trace must show the SASL exchange's shape and none of its secret.
+    #[test]
+    fn the_outbound_trace_redacts_only_the_sasl_payload() {
+        // The payload — base64 of `alice\0alice\0hunter2` — is the secret itself.
+        assert_eq!(
+            super::redact_outbound("AUTHENTICATE YWxpY2UAYWxpY2UAaHVudGVyMg=="),
+            "AUTHENTICATE <redacted>"
+        );
+        // The mechanism offer and the empty response carry nothing.
+        assert_eq!(
+            super::redact_outbound("AUTHENTICATE PLAIN"),
+            "AUTHENTICATE PLAIN"
+        );
+        assert_eq!(super::redact_outbound("AUTHENTICATE +"), "AUTHENTICATE +");
+        // Everything else passes through untouched, including a message whose
+        // text merely mentions the command.
+        assert_eq!(
+            super::redact_outbound("PRIVMSG #chan :AUTHENTICATE this"),
+            "PRIVMSG #chan :AUTHENTICATE this"
+        );
+        assert_eq!(super::redact_outbound("CAP LS 302"), "CAP LS 302");
     }
 }

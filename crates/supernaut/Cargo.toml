@@ -14,3 +14,4 @@ havoc-transport.workspace = true
 supernaut-tui.workspace = true
 tokio = { version = "1.53.1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "time", "sync"] }
 clap = { version = "4.6.6", features = ["derive"] }
+keyring = "4.1.6"

@@ -24,6 +24,9 @@
 //! [networks.libera]
 //! host = "irc.libera.chat"
 //! autojoin = ["#supernaut"]
+//! # The account name only. The password lives in the OS keyring:
+//! #     printf %s 'secret' | supernaut credential set libera
+//! sasl_account = "alice"
 //!
 //! [networks.ergo-local]
 //! host = "localhost"
@@ -47,8 +50,13 @@ const REALNAME: &str = "supernaut debug session";
 
 /// Refused **by name**, in any table. `deny_unknown_fields` already rejects
 /// them; what this list buys is a message that says credentials never live in
-/// this file and points at the keyring, which is what makes the rule executable
-/// rather than aspirational (NORTH-STAR §5.8).
+/// this file and names the two commands that replace the key the person just
+/// typed — an instruction now that the keyring exists, where before prompt 10b
+/// it could only be an aspiration (NORTH-STAR §5.8).
+///
+/// [`NetworkEntry::sasl_account`] is deliberately **not** on this list: an
+/// account name is not a credential, and the message below says credentials, so
+/// adding it would put a lie in the error a user reads.
 const CREDENTIAL_KEYS: [&str; 4] = ["password", "pass", "sasl_password", "nickserv_password"];
 
 /// The whole file. `deny_unknown_fields` is not optional: a silently-ignored
@@ -99,6 +107,11 @@ pub struct NetworkEntry {
     /// a CR/LF would inject a second command outright.
     #[serde(default)]
     pub autojoin: Vec<String>,
+    /// Authenticate with SASL PLAIN as this account. **The secret is not here,
+    /// and cannot be** (§5.8): it comes from the OS keyring, keyed by this
+    /// network's name — `supernaut credential set <network>` puts it there.
+    /// Absent means no SASL at all, and no keyring access whatsoever.
+    pub sasl_account: Option<String>,
     /// The loud opt-in (§2.3), and loopback-only — stricter than the north star
     /// asks, kept because it is the debug-grade rule stage 1 shipped; relaxing
     /// it is a product call belonging to stage 2's first-run. A **per-network
@@ -135,7 +148,9 @@ fn refuse_credential_keys(table: &toml::Table) -> Result<(), String> {
         if CREDENTIAL_KEYS.contains(&key.as_str()) {
             return Err(format!(
                 "config: `{key}` is never a config key — SASL/NickServ credentials \
-                 live in the OS keyring, never in plaintext in this file (NORTH-STAR §5.8)"
+                 live in the OS keyring, never in plaintext in this file (NORTH-STAR §5.8). \
+                 Set `sasl_account` in the network's table instead, and run \
+                 `supernaut credential set <network>` to store the password."
             ));
         }
         refuse_in_value(value)?;
@@ -198,6 +213,38 @@ impl Config {
                     ));
                 }
             }
+            if let Some(account) = &entry.sasl_account {
+                // What a network *permits* as an account name is the network's
+                // business — policing it would be guessing, exactly as with
+                // channel names. What is ours is the payload we frame: SASL
+                // PLAIN sends `authcid\0authcid\0password`, so a control
+                // character splits or corrupts our own payload, and whitespace
+                // is a quoting mistake worth naming for free.
+                if account.trim().is_empty() {
+                    return Err(format!(
+                        "config: network {name}: `sasl_account` must not be empty — \
+                         remove the key to connect without SASL"
+                    ));
+                }
+                if account.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    return Err(format!(
+                        "config: network {name}: `sasl_account` {account:?} must not contain \
+                         whitespace or control characters — it is framed into the SASL PLAIN \
+                         payload `account\\0account\\0password`, which a control character \
+                         splits and a space is almost always a quoting mistake in"
+                    ));
+                }
+                // Stricter than §2.3 demands, like the loopback rule below it:
+                // relaxing this is stage 2 item 7's product call, where the
+                // plaintext-LAN user first appears.
+                if entry.plaintext {
+                    return Err(format!(
+                        "config: network {name}: `sasl_account` with `plaintext` would send \
+                         the password in cleartext — SASL PLAIN puts the secret on the wire, \
+                         and plaintext leaves it readable. Drop one of the two keys."
+                    ));
+                }
+            }
             if entry.plaintext {
                 if entry.tls_ca.is_some() {
                     return Err(format!(
@@ -233,9 +280,11 @@ impl Config {
     /// a config field, with the uniqueness rule and the migration story that
     /// implies.
     ///
-    /// `sasl` lowers to `None`, always: config has no credential surface to
-    /// lower from (§5.8), and the binary injects the selected network's
-    /// credentials afterwards.
+    /// `sasl` lowers to `None`, always: config holds only half a credential
+    /// (§5.8), so there is nothing here to lower. The binary joins the two
+    /// halves afterwards, for the selected network alone — `sasl_account` from
+    /// this same file, the password from the OS keyring keyed by the network's
+    /// name (`crates/supernaut/src/credentials.rs`).
     #[must_use]
     pub fn into_networks(self) -> HashMap<NetworkId, NetworkSettings> {
         let nick = self.nick;
