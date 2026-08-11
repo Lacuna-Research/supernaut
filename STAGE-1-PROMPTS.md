@@ -1,6 +1,6 @@
 # Stage 1 — The Prompts
 
-**Status:** 11/12 complete. Next: prompt 10b.
+**Status:** 12/12 complete. Stage 1 closed — retrospective in BUILD-LOG.md; stage 2 planning is next.
 
 <!-- 12 must match the STAGES array in scripts/check-docs.sh — change both together.
 The line is machine-read; `make check` fails if they disagree. Prompts 9 and 10
@@ -2156,6 +2156,19 @@ schema's absence of a column enforces); add platform detection to live-run.sh (s
 dogfood Mac, still waiting on CI); and add any dependency beyond `keyring` in
 crates/supernaut.
 ```
+
+**Status:** complete. Shipped per the JIT detail: `sasl_account` is the only
+credential-adjacent config key, the secret lives in the OS keyring keyed by the network's
+name, `supernaut credential set <network>` reads it from stdin only, and `--sasl` plus the
+`SUPERNAUT_SASL_PASSWORD` bridge are deleted rather than deprecated. Two deviations are
+recorded in the log entry: the encrypted-file half of §5.8 is deferred to PLAN stage 4
+item 3 with the store-unavailable error naming the deferral out loud, and **the stage
+acceptance run ran against OFTC, not Libera.Chat**, because Libera network-banned this IP
+mid-prompt — so the Done-when's SASL clause closes with a named gap (no registered
+account; OFTC advertises no `sasl` at all; keyring-SASL is proven against ergo on every
+live run) rather than a claimed run. Deliberately left untested: the `Ambiguous` keyring
+arm, which only the secret-service store can construct and which therefore cannot fire on
+the dogfood platform at all.
 
 ---
 

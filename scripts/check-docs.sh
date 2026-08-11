@@ -37,6 +37,11 @@ CATEGORY_LIMIT=3
 # status and retrospective checks still have to hold.
 STAGES=(
 	"1:STAGE-1-PROMPTS.md:12"
+	# Commented until stage 2 is planned. The 18 is an inherited template
+	# **placeholder**, not a count anybody derived — PLAN.md's stage 2 has 7 items
+	# today. Set it to the real number in the same commit that writes
+	# STAGE-2-PROMPTS.md and moves README_STAGE, or the first status line written
+	# will be checked against a number nobody chose.
 	# "2:STAGE-2-PROMPTS.md:18"
 )
 
@@ -52,6 +57,17 @@ cd "$(git rev-parse --show-toplevel)"
 # instead of memory — "this rule never helps" is otherwise an asserted-not-tested
 # claim. Local runs only (CI checkouts are discarded), one line per day/rule/branch
 # so re-running against the same unfixed failure does not inflate the count.
+#
+# **The path is relative, so the ledger is per-checkout — and prompts run in worktrees
+# that are deleted when their PR merges.** Stage 1 finished with no ledger anywhere:
+# not in the primary checkout (no prompt ever runs there) and not in any worktree
+# (they are gone). So a retrospective cannot tell "no rule ever fired" from "every
+# record was thrown away", and must say which it is rather than infer. The fix is to
+# anchor this at the parent of `git rev-parse --git-common-dir` so every worktree
+# appends to one file; that is a *behaviour* change, so it lands with fixtures in
+# scripts/test-checks.sh — owed by the commit that opens stage 2, and argued in
+# BUILD-LOG.md's `## Retrospective — Stage 1` (Rule review) rather than filed under a
+# feature item, since it is tooling and PLAN.md has no numbered item for tooling.
 rule="unset"
 LEDGER=discipline-stats.txt
 fail=0

@@ -2982,3 +2982,234 @@ before it is trusted". CI is `ubuntu-latest`, and it built and tested this PR **
 which is what the stage 6 item 3 note says. It is evidence that the Linux tree is not
 broken; it is not evidence that anyone has reviewed ~30 new crates, and the release item is
 where that distinction has to be paid.
+
+## Retrospective — Stage 1
+**Date:** 2026-08-10
+
+Stage 1 closed at 12/12: twelve prompts, 12 prompt entries plus 4 review addenda, 38
+decision entries, 2 corrections, and 5 questions still open. The engine connects to a real
+network over TLS with SASL, logs what it sees into SQLite, and answers search, backlog and
+read-marker requests through a typed boundary a debug CLI drives. 74 tests. No UI.
+
+**CLAUDE.md:** re-read end to end. **Two corrections, no prunes, and the honest reason
+for that.** Corrected: (1) the Secrets paragraph promised "the OS keyring (encrypted-file
+fallback)" as shipped fact when prompt 10b deferred the file half — now "(encrypted-file
+fallback deferred — PLAN stage 4 item 3)", the same staleness the drill found in
+NORTH-STAR §5.8 and fixed by the same reasoning; (2) the live-run rule named
+"local `ergo` or Libera.Chat" as the two targets, and Libera has network-banned this
+machine — now "local `ergo` or a public network", which is also the more durable sentence.
+**Nothing was pruned**, and that is a finding rather than a pass: at **100/100 lines the
+cap is fully consumed**, so the next rule that earns a place has to evict one, and no
+section is currently dead enough to volunteer. One genuine deletion *candidate*, proposed
+here rather than taken silently because deleting a rule wants a decision entry: "Vendored
+fixtures must record their upstream commit SHA" has no subject in the tree — the only
+external artifact is `ergo`, which is downloaded and sha256-verified by
+`scripts/live-run.sh`, not vendored. It has therefore never fired and cannot fire until
+something is actually vendored. Left in place for now (a rule that is merely dormant is
+cheaper than re-deriving it later), but it is the line to spend when the cap next binds.
+Two pointers deliberately **not** changed: line 4 still names `STAGE-1-PROMPTS.md` as the
+queue, which is true today and becomes false the moment `STAGE-2-PROMPTS.md` exists — so
+it is on the stage-2 opening checklist below, per the rule that a doc is fixed by the
+commit that stales it; and the `discipline-stats.txt` sentence still describes the
+telemetry as something the rule review argues from, which the Rule review section below
+shows is not yet true — the caveat lives at the mechanism (a comment in
+`scripts/check-docs.sh`) rather than costing a line here.
+
+**Docs audit:** every artifact opened and checked, not just the ones the drill named.
+
+- **NORTH-STAR.md** — two real staleness bugs, both fixed by a **dated appendix**
+  (2026-08-10), never by editing the section, which is this document's own rule. §9 listed
+  *buffer identity* and *config vs. runtime state* as open when both were settled in stage
+  1, and *the name* as open when the 2026-08-09 amendment settled it; the appendix marks
+  the three settled, points the two genuinely-open ones at PLAN, and states that **PLAN's
+  Still open list is the sole live register** — §9 is the snapshot this document opened
+  with. It also records a gap neither document had: §9 **omits** the licence question, and
+  PLAN does not carry it either, so it is owed before stage 6's release item. Separately,
+  §5.8's "keyring with encrypted-file fallback" now says the keyring half shipped and the
+  file half is deferred, with the item and deadline.
+- **README.md** — four fixes beyond the badge and row. "**Nothing runs yet**" was false: it
+  now says stage 1 is complete, names what the headless engine does, and says plainly that
+  there is no UI yet and nothing is packaged. The stage 1 heading said "(in progress)". And
+  the **Building** section gained the toolchain preconditions a fresh session on this
+  machine trips over first: `cargo` must be on `PATH` and Homebrew's rustup leaves it off,
+  with the exact `export`; plus `sqlite3`/`openssl`/`nc` for the live run, the pinned
+  `ergo` download, and the one login-keychain item that run creates and removes.
+- **PLAN.md** — current, because it was edited inside each prompt rather than swept at the
+  end; this stage added 43 carry-forward notes to later stages and 5 Still-open questions
+  that way. Stage 1 item 10's fallback wording and the stage 1 Done-when's honest
+  "what went unproven" paragraph both landed in prompt 10b's own commits.
+- **STAGE-1-PROMPTS.md** — status line at 12/12 with the new closing form, 10b's outcome
+  paragraph appended under its block, and **no `### Carry-forward` block left on any
+  prompt** (verified: the only two in the file are the preamble's convention heading and
+  its illustrative example, which sit above prompt 1 and which check 7's position counter
+  ignores by construction).
+- **scripts/check-docs.sh** — two comment-only edits, no behaviour change and therefore no
+  `test-checks.sh` fixture owed: the commented `2:STAGE-2-PROMPTS.md:18` line now says the
+  18 is an inherited template **placeholder** (PLAN's stage 2 has 7 items) to be set when
+  stage 2 is planned, and the ledger's definition now documents that it is per-checkout.
+- **METHOD.md** — read, nothing stale found; it describes the method's reasoning, which
+  this stage did not change.
+
+**Failure register:** two `## Correction` entries in the whole stage, and the register is
+exactly those entries and their `**Category:**` tags — stated because the drill (finding 6)
+could only infer it. Counts against `CATEGORY_LIMIT=3`: **`stale-doc-copy` 1**, the TLS
+decision entry that misstated its own alternative; **`convention-not-checked` 1**, merged
+branches never deleted, eleven times — a single correction covering eleven occurrences,
+which is the shape that matters here, because it closed its loop with a mechanical guard
+rather than a reminder. Neither category is trending: no second occurrence of either, and
+nothing at two. What the register does **not** capture, and should be read alongside: this
+stage's most expensive mistakes were caught by the post-prompt review and recorded as
+review findings, not as corrections — 10a's unvalidated `autojoin` line integrity and 10b's
+inert base64 assertion were both real shipped-or-nearly-shipped bugs. A correction entry is
+for a *past log entry* being wrong, so the register is deliberately narrower than "things
+we got wrong", and reading it as the latter would flatter the stage.
+
+**Rule review:** **the ledger does not exist, and that is the finding.**
+`discipline-stats.txt` is absent from the primary checkout, absent from this worktree, and
+absent from the machine — `find` over the whole repository returns nothing. The mechanism is
+sound in isolation (`err()` appends `date rule branch`, local runs only, deduplicated per
+day/rule/branch) but the **path is relative and prompts run in worktrees that are deleted
+when their PR merges**, so every prompt's telemetry died with its worktree, and the primary
+checkout has none because no prompt is ever run there. The consequence is precise and worth
+stating rather than glossing: **this review cannot distinguish "no rule ever fired in twelve
+prompts" from "every record was thrown away", and it therefore cannot argue from counts at
+all** — which is exactly the failure mode the ledger was introduced to prevent, arriving in
+a form nobody checked for. The instruction for this retrospective was to read the primary
+checkout's copy; there is no copy to read, so the instruction is answered by reporting its
+absence instead of inferring a zero. What can be said honestly without the ledger: no
+`make check` failure was observed locally in prompt 10b's own worktree across roughly a
+dozen runs, and the checks that visibly did work this stage did so as *blockers* rather than
+as telemetry — the size cap forced 10a's oversize justification, the ratchet forced two file
+splits, check 10 fused this retrospective into 10b's PR, and check 7 is what makes a
+consumed carry-forward a mechanical fact. **No rule is proposed for deletion on evidence,
+because there is no evidence**; the one dormant rule found by reading is the vendored-fixture
+SHA rule above. **The mechanization this review does earn** is the fix to the ledger itself:
+anchor the path at the parent of `git rev-parse --git-common-dir` so every worktree appends
+to one file. It is a behaviour change, so it lands with fixtures in
+`scripts/test-checks.sh`, and it is **owed by the commit that opens stage 2** — recorded
+here and in a comment at the mechanism, deliberately not filed under a PLAN feature item,
+because PLAN has no numbered item for tooling and burying tooling under "Embedded-mode
+wiring" is how a note stops being read. Deferred out of this PR on the coordinator's
+prefer-filing guidance, and because a check that lands without its fixtures is the thing
+CLAUDE.md forbids most specifically.
+
+**Cold-start drill:** a fresh sub-agent, given only the repository at commit `cdc431c`, was
+asked what comes next and why. **It got the answer right**: it identified the project, that
+stage 1 was the active stage, that prompt 10b's implementation was complete, and that the
+next unit of work was this closing commit — the retrospective plus the 12/12 bump. It also
+hit the anticipated status-lag state (`**Status:** 11/12` over finished 10b code) and
+**recognised it from the queue text rather than being misled by it**, which is the fused-PR
+decision working as designed — though only because it read 1,889 lines in to find the
+explanation. Thirteen gaps, with what each produced:
+
+1. **The status line said 11/12 over finished 10b code, with no pointer near the line.**
+   Transient — this commit ends it — but the pattern recurs at every stage boundary.
+   Recorded; the fused-PR decision in the 10b block already documents the window.
+2. **Nothing on disk says the implementation is finished and only the closing commit
+   remains; PR state is unknowable from documents.** Inherent: git and GitHub state are not
+   repository content. Recorded, not fixed.
+3. **No document said what follows "Next:" in a 12/12 status line.** **Fixed** by deciding
+   it: `**Status:** 12/12 complete. Stage 1 closed — retrospective in BUILD-LOG.md; stage 2
+   planning is next.` Verified against check 5's regex before committing — it captures the
+   count and accepts any text after "complete" — and against check 8, whose "Next: prompt M"
+   parse now yields empty and skips cleanly instead of failing.
+4. **Who opens stage 2, and the commented placeholder naming 18 prompts against PLAN's 7
+   items.** **Comment-only fix** in `check-docs.sh` saying the 18 is an inherited
+   placeholder to be set when stage 2 is planned; the opening sequence is recorded in Next
+   stage below.
+5. **`discipline-stats.txt` absent, and nothing said which checkout's ledger governs.**
+   **Fixed and escalated** — the drill found the symptom, and looking for the primary
+   checkout's copy found there is none anywhere. Documented at the mechanism, and the real
+   repair is owed by stage 2's opening commit. See Rule review, which this finding rewrote.
+6. **How the failure register's counts are produced was inferred, not stated.** **Fixed by
+   stating it**: the register is the `## Correction` entries and their `**Category:**`
+   tags. See Failure register.
+7. **NORTH-STAR §9 listed settled questions as open and omitted the licence, while PLAN
+   cites §9 as live.** **Fixed** by dated appendix.
+8. **§5.8 promised keyring *plus* fallback with no note the fallback is deferred.**
+   **Fixed** in the same appendix.
+9. **No rule said whether a stage may close with a Done-when clause unproven.** Recorded as
+   a principle, because it is the honesty rule's corollary rather than a new rule: **it may,
+   when the gap is named where the claim would be** — in the Done-when itself, in the
+   prompt's Live run section, and on Still open with an owner. The instance is SASL at a
+   public network. The alternative — holding a stage open until a volunteer network's ban
+   appeal is answered by a human who is not in the loop — would trade a named gap for an
+   unnamed stall, which is worse in exactly the way this log exists to prevent.
+10. **Whether a docs-only closing commit owes Shipped/Learned/Live-run.** Recorded: check 3
+    requires those sections only for `crates/` changes, and the retrospective template
+    governs this commit. The drill's inference was correct; saying so is the fix.
+11. **Drill circularity — its own fixes change the branch it ran against.** Recorded as
+    convention: **the drill runs once, against the finished branch (`cdc431c`), and its
+    fixes are its output.** It is not re-run to make it come out clean, because its purpose
+    is measurement, not a green light — re-running until there are no gaps would convert
+    the one honest instrument at the boundary into a formality.
+12. **The stage-acceptance evidence lives in gitignored `.cache/`; a fresh clone has only
+    prose.** Recorded as a deliberate trade, not an accident: the **committed recipe is the
+    Acceptance paragraph of the 10b block**, which is reproducible on any machine, while
+    logs are per-machine and would rot into fiction if committed. The cost is real — a
+    reader cannot audit the numbers, only re-run them.
+13. **Toolchain preconditions unstated; the Makefile calls bare `cargo`.** **Fixed** in
+    README's Building section, including the Homebrew-rustup `PATH` trap that every fresh
+    session on this machine hits first, the live run's other binaries, and the keychain item
+    it creates.
+
+Nine of the thirteen produced a documentation fix in this commit; four are recorded as
+inherent or as conventions. The drill's value was concentrated in the two it found that
+nobody had suspected — the missing ledger (5) and NORTH-STAR §9 (7) — both of which are
+documents *quietly disagreeing with reality* rather than documents that are merely thin,
+which is the class a fresh reader is uniquely able to see.
+
+**Ratchets:** `todo-count` **0** against a ceiling of 0 — at ceiling all stage, and no
+`TODO`/`FIXME`/`HACK` was ever committed. `longest-file` **393** against a ceiling of 400.
+**Neither ceiling was tightened, and the reason is that neither improved:** `longest-file`
+went 363 → 399 → 393 within prompt 10b alone (the redactor pushed `actor.rs` to one line of
+headroom; the review's fix moved it to `connection/trace.rs`, bringing `actor.rs` to 352),
+so 393 is a recovery from a self-inflicted worsening, not a gain, and tightening to it would
+turn the ratchet on the strength of a repair. `crates/havoc-core/tests/config.rs` is now the
+file at the wall at 393 — **seven lines of headroom, and the next prompt to grow it splits
+it**, because raising a ceiling is a decision entry and not a convenience. The ratchet did
+real work this stage: it forced two file splits that would otherwise have been argued about.
+
+**Next stage:** nothing was reordered, rescoped or deleted in PLAN.md at this boundary —
+stage 2's seven items still read correctly against what stage 1 actually shipped — but the
+stage does not open with a blank slate, and two proposals are named here rather than made
+silently, per the rule that structural changes are proposed and not enacted.
+
+**Opening stage 2 is its own first unit of work**, and it is one commit doing four things
+together, because any three of them without the fourth leaves `make check` describing a
+repository that does not exist: write `STAGE-2-PROMPTS.md` (with prompts 1–4 detailed and
+the rest carrying scope and fence only, per the JIT rule that stage 1 vindicated);
+uncomment the `STAGES` line and **set the real prompt total** in place of the inherited 18;
+move `README_STAGE` to 2 and add the stage 2 badge and progress table; and update
+CLAUDE.md's line 4 pointer from `STAGE-1-PROMPTS.md` to the new queue. The ledger fix from
+Rule review, with its `test-checks.sh` fixtures, belongs in that same commit — it is the
+one piece of tooling debt this stage leaves, and the next retrospective is unable to do its
+job without it.
+
+**Stage 1 left 43 carry-forward notes on later stages, and 19 of them are on stage 2** — 7
+on item 1 (embedded wiring), 6 on item 7 (first-run), 5 on item 5 (input and command line),
+1 on item 3 (scrollback). That distribution is the argument for both proposals.
+
+- **Proposal: handle `465` before the TUI work, not inside it.** Item 1's newest note is
+  that a network which bans us is retried forever, observed live at Libera during 10b's
+  acceptance run. It is engine-side, small, and independent of every UI decision around it,
+  and stage 3's dogfood month must not begin with a client that hammers networks that have
+  said no. Proposed as stage 2's first *code* prompt — ahead of embedded wiring — or as a
+  numbered item of its own.
+- **Proposal: pull item 7's *decisions* forward without moving its polish.** First-run is
+  listed last, but six stage-1 notes hand it questions that earlier items depend on: whether
+  config stays mandatory and how a wizard may write it, the no-echo prompt, whether the
+  loopback-only plaintext rule and the `sasl_account` + `plaintext` refusal relax, whether
+  validation moves off `parse`, and the step order `credential set` already forces (config
+  written and validated *before* the password is taken). Item 5's composer work and item 1's
+  wiring both touch the first two. Proposed: answer those as decision entries early in the
+  stage, and leave the wizard itself where it is.
+
+One thing stage 1 should be honest about handing over: **the two clauses of its own
+Done-when that closed with named gaps** — SASL against a public network (no registered
+account; Libera has network-banned this IP; OFTC advertises no `sasl` at all) and, found by
+the same run, that on a network without `echo-message` nothing the user says is stored at
+all. The first is on Still open with the user as owner. The second is on stage 2 item 5 with
+stage 3 as its deadline, and it is the more dangerous of the two, because it is not a gap in
+what was verified — it is a gap in what was *built*, discovered only because the acceptance
+run went somewhere the plan had not.

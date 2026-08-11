@@ -469,3 +469,44 @@ standalone daemon earns its own brand at the daemon stage — `havocd`. Referenc
 `havoc`/`havocd` in the body above should be read through this mapping. §9's "The
 name" open question is settled; the reasoning is a decision entry in `BUILD-LOG.md`
 dated today.
+
+---
+
+## Amendment — 2026-08-10: §9's open questions are no longer the live register, and §5.8's credential fallback is deferred
+
+Appended rather than edited in, per this document's own rule. Two corrections, both found
+by stage 1's cold-start drill (BUILD-LOG.md, `## Retrospective — Stage 1`).
+
+**§9 is a snapshot of the questions this document opened with, not a live list.** The
+single live register is **`PLAN.md`'s Still open list** — it carries the machine-readable
+blocking annotation `make check` reads, and it is where a question must go to be found
+again. Read §9 as history; where the two disagree, PLAN wins. Of §9's five entries:
+
+- **Buffer identity across networks** — *settled*: two buffers, keyed by
+  `(network_id, name)`, since the stage 1 schema hardened around it. The question that
+  remains is narrower and lives in PLAN: `in:` is a buffer-*name* filter with no network
+  scope, which is stage 2's `/search` grammar call.
+- **Config vs. runtime state** — *settled*: the database owns runtime state, config is
+  seed-only, and the program never writes its own config file (decision entry
+  2026-08-10; havoc-core is compiled without a TOML serializer, so it *cannot*).
+- **The name** — *settled* by the 2026-08-09 amendment above: Supernaut, with havoc as
+  the headless engine.
+- **Read marker reconciliation** and **retention policy** — still open, and both live in
+  PLAN's Still open list with their current state, not here.
+
+§9 also **omits** a question this document treats as unsettled elsewhere — the licence —
+and PLAN does not carry it either. Recorded here as a real gap rather than silently
+adopted: it is owed before stage 6's release item, and belongs on PLAN's Still open list
+the moment anybody has an opinion about it.
+
+**§5.8 promises "`keyring` where available, encrypted-file fallback otherwise". The
+keyring half shipped in stage 1 prompt 10b; the file half is deferred.** §5.8 states the
+destination and remains the standing intent — it is not weakened here. What changed is the
+schedule, and the honesty about it: a fallback file needs an encryption key, and every
+honest source of one was out of stage 1's reach (the reasoning, including why keyring 4's
+own `db-keystore` is worse rather than better, is the 2026-08-10 decision entry "the
+encrypted-file credential fallback is deferred, and its absence is made loud"). Until it
+lands, the absence is spoken rather than discovered: an unavailable store produces an
+error that names the deferral. Filed on **PLAN stage 4 item 3** — a daemon started at
+login against a locked Secret Service is its first real consumer — and **due by stage 6
+item 3**, where "runs on Linux" becomes a user promise.
