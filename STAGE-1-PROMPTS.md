@@ -1875,6 +1875,34 @@ restart, search — the "Done when" of the stage, driven end to end.
   point. Do not add `sasl_account` to the refusal list "for symmetry": an
   account name is not a secret, and the refusal message says credentials, which
   would then be a lie.
+- From prompt 10a: **key keyring entries by the config network *name*, never by
+  `NetworkId`.** `Config::into_networks` in `crates/havoc-core/src/config.rs`
+  numbers networks `1..N` from the `BTreeMap`'s sorted order, so adding
+  `[networks.aardvark]` renumbers every network after it. That is unobservable
+  today *only* because nothing persists a wire id — and a keyring entry keyed by
+  `NetworkId` would be the first thing that did, silently re-pointing one
+  network's credentials at another's after an unrelated config edit. The name is
+  the stable key; it is what storage keys on too.
+- From prompt 10a: **resolve the secret for the selected network only.** The
+  injection site in `crates/supernaut/src/session.rs` mutates
+  `networks.get_mut(&network)` *after* lowering, but the map deliberately holds
+  every configured network (§6.9's actor map). A keyring pass that walks the whole
+  map unlocks — or prompts for — secrets belonging to networks this process will
+  never dial, which is both a bad prompt and a wider blast radius than the session
+  needs.
+- From prompt 10a: **the live-run credential surface is two lines, and
+  `write_config` is fixed-shape.** `scripts/live-run.sh` passes
+  `SUPERNAUT_SASL_PASSWORD="$FAKE_PASS"` and `--sasl alice` on session A only, and
+  its `write_config` helper always emits exactly host/port/tls_ca (+ optional
+  autojoin) — there is no way to generate a config carrying an account key.
+  Deleting the env bridge means *extending the helper*, not just editing A's
+  invocation. Fixture credentials stay recognisably fake (CLAUDE.md).
+- From prompt 10a: **the stage-1 acceptance run against a real network now needs a
+  hand-written config in an isolated `SUPERNAUT_CONFIG_DIR`.**
+  `--host`/`--port`/`--nick`/`--join`/`--tls-ca` no longer exist and there is
+  deliberately no `--config` flag, so `supernaut session` against Libera.Chat is
+  not a one-liner any more. Budget that as an explicit step of the acceptance run
+  rather than discovering it at the end of the stage.
 
 ---
 

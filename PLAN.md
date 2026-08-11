@@ -212,6 +212,13 @@ Covers NORTH-STAR §8 M3.
      non-zero on timeout, so any path that quits early can now fail where it used
      to succeed silently. Reach a quiescent point before quitting, or pass a
      deadline. Config autojoin itself is safe: it issues no `Request` at all.
+   - From stage 1 prompt 10a: **the plaintext warning fires once at session start,
+     for the selected network only.** `run()` in
+     `crates/supernaut/src/session.rs` matches on `settings.security` for the one
+     resolved network before any dial. Autoconnect dialing several networks makes
+     that the wrong place outright: a plaintext network that is not the selected
+     one connects with **no warning at all**, which is §2.3's loud opt-in silently
+     failing. The warning belongs at the dial, not at startup.
    - From stage 1 prompt 5: **the event stream is duplicated and cross-lane
      unordered.** The actor emits ConnectionState on every internal state change
      (repeated `phase=connecting`), and `wiring.rs` merges directed and broadcast
@@ -230,11 +237,14 @@ Covers NORTH-STAR §8 M3.
      observed printing the event *first*. The projection must not treat the Ack as
      the marker's arrival, nor the event as confirmation of its own request.
    - From stage 1 prompt 9a: **`BufferCreated` can arrive AFTER a `Backlog`
-     response naming the same buffer.** Announcements go out on a spawned task
-     (`announce` in `crates/havoc-core/src/core/reads.rs`) while responses go out
-     inline, so the projection must tolerate a *Response* — not just an Event —
-     naming a `BufferId` it has never been told about. The note above covers the
-     opposite ordering; this is the one the attach path introduces.
+     response naming the same buffer.** `announce`
+     (`crates/havoc-core/src/core/reads.rs`) and responses both go out inline from
+     the core loop since prompt 9b — but the *storage jobs* behind them still
+     complete in their own order, so the projection must tolerate a *Response* —
+     not just an Event — naming a `BufferId` it has never been told about. (This
+     note said "a spawned task" until prompt 10a corrected it; 9b deleted the task
+     and left the ordering hazard.) The note above covers the opposite ordering;
+     this is the one the attach path introduces.
 2. **Wrapped-line cache.** The largest single piece of original UI work (§4.10): keyed
    on (buffer, width), invalidated on resize, pre-rendered `Line` window around the
    viewport. Its own module, property-tested over random resize sequences (§6.7).
@@ -313,6 +323,15 @@ Covers NORTH-STAR §8 M3.
      `crates/havoc-core/src/config.rs` additionally refuses any non-loopback host.
      It was kept at 10a because it is the debug-grade rule stage 1 shipped — but a
      user with a plaintext LAN bouncer first appears here.
+   - From stage 1 prompt 10a: **config validation is a property of `config::parse`,
+     not of the `Config` type.** In `crates/havoc-core/src/config.rs` the fields are
+     public and `validate` is private, while `into_networks` is `pub` — so a wizard
+     that builds a `Config` in code and hands it straight to `into_networks` skips
+     the loopback-only plaintext rule, the autojoin line-integrity rule, and
+     `tls_ca`'s base-dir resolution, silently. Either the wizard round-trips its
+     answers through `parse` (which also means it must produce TOML text, which the
+     no-serializer decision makes deliberate work), or validation moves into
+     `into_networks`. Decided here, with a real second constructor in front of it.
 
 **Done when:** you can spend a full day in it as your only client on one network and
 never reach for irssi.
@@ -426,6 +445,18 @@ is not a few hundred lines, stop and reexamine stage 1 (§5.4).
    (whether the daemon additionally brands as `havocd` is decided here); socket
    lifecycle and orphan cleanup; detach loses nothing, attach renders from buffers +
    read markers alone (§4.5).
+
+   ### Carry-forward
+   - From stage 1 prompt 10a: **the orphan-network report is engine stderr only, so
+     the daemon breaks the abandonment decision's "made visible" half.** `announce`
+     in `crates/havoc-core/src/core/reads.rs` prints `orphan network <name>: N
+     buffers not announced (not in config)` with `eprintln`, once per attach —
+     embedded mode puts that on the user's terminal, but under the daemon it goes to
+     the daemon's stderr and the attaching client sees *nothing*: history silently
+     missing, with the explanation in a file the user is not reading. 10a's fence
+     forbade a new `Event` variant at v1, which is why it shipped as a log line;
+     this is where it needs either a frame representation (with stage 4's handshake
+     gating the variant) or a documented, discoverable log location.
 
 **Done when:** kill the TUI while the daemon holds the connection, reattach, and the
 buffer looks right.

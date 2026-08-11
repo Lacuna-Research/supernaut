@@ -291,6 +291,15 @@ for _ in $(seq 1 50); do
 	[ "$(grep -c 'waited rows #supernaut' "$WORK/a.out")" -ge 2 ] && break
 	sleep 0.2
 done
+# The post-loop check the other sync points have and this one did not: without it a
+# timeout here falls through into the search and marker assertions, which then fail
+# for the wrong reason (an empty corpus) and hide the reconnect as the real cause.
+[ "$(grep -c 'waited rows #supernaut' "$WORK/a.out")" -ge 2 ] || {
+	echo "FAIL: A never re-autojoined #supernaut after the ergo restart; a.out tail:" >&2
+	tail -20 "$WORK/a.out" >&2
+	tail -10 "$WORK/ergo.log" >&2
+	exit 1
+}
 # --- Search (prompt 8): by now the corpus spans two channels and a restart.
 SEARCH_START=$(date +%s)
 printf 'search deployment\nwait search 1 10\n' >&3 || true

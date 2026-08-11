@@ -116,7 +116,7 @@ hostname = "typo.example"
         "a silently-ignored typo is the bug class deny_unknown_fields exists for: {message}"
     );
     // Top-level too, not only inside a network table.
-    let top = err("nick = \"alice\"\ntheme = \"dark\"\n");
+    let top = err("nick = \"alice\"\ntheme = \"dark\"\n[networks.libera]\nhost = \"h\"\n");
     assert!(top.contains("theme"), "{top}");
 }
 
@@ -125,7 +125,9 @@ hostname = "typo.example"
 #[test]
 fn credential_shaped_keys_are_refused_by_name() {
     for key in ["password", "pass", "sasl_password", "nickserv_password"] {
-        let top = err(&format!("nick = \"alice\"\n{key} = \"hunter2\"\n"));
+        let top = err(&format!(
+            "nick = \"alice\"\n{key} = \"hunter2\"\n[networks.libera]\nhost = \"h\"\n"
+        ));
         assert!(top.contains(key) && top.contains("keyring"), "{top}");
         let nested = err(&format!(
             "nick = \"alice\"\n[networks.libera]\nhost = \"h\"\n{key} = \"hunter2\"\n"
@@ -185,12 +187,71 @@ fn a_missing_empty_or_whitespace_nick_errors() {
     );
 }
 
+/// Whitespace-only counts as empty for both: a `[networks." "]` table would
+/// otherwise mint a `network` row named `" "` that nothing could refer to again.
 #[test]
 fn an_empty_host_or_network_name_errors() {
     let host = err("nick = \"a\"\n[networks.libera]\nhost = \"\"\n");
     assert!(host.contains("libera") && host.contains("host"), "{host}");
+    let blank_host = err("nick = \"a\"\n[networks.libera]\nhost = \"  \"\n");
+    assert!(
+        blank_host.contains("libera") && blank_host.contains("host"),
+        "{blank_host}"
+    );
     let name = err("nick = \"a\"\n[networks.\"\"]\nhost = \"h\"\n");
     assert!(name.contains("empty name"), "{name}");
+    let blank_name = err("nick = \"a\"\n[networks.\" \"]\nhost = \"h\"\n");
+    assert!(blank_name.contains("empty name"), "{blank_name}");
+}
+
+/// A `nick`-only file is schema-valid — `networks` is `#[serde(default)]` — so
+/// without this rule the refusal came from the binary and blamed `--network`,
+/// which is the wrong thing to tell someone whose file has no network in it.
+#[test]
+fn a_config_naming_no_networks_errors() {
+    let message = err("nick = \"alice\"\n");
+    assert!(
+        message.contains("no networks") && message.contains("networks."),
+        "the error must name the missing table, not a flag: {message}"
+    );
+}
+
+/// Channel *names* stay unvalidated (CHANTYPES is ISUPPORT's), but the **line**
+/// is ours: entries are joined with `,` into one `JOIN`, so a space turns
+/// `#my chan` into channel `#my` with key `chan` — a silently wrong join nobody
+/// reports — and a CR/LF injects a second IRC command. Same rule as `nick`, same
+/// reason.
+#[test]
+fn autojoin_entries_that_would_corrupt_the_join_line_error() {
+    let spaced = err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nautojoin = [\"#my chan\"]\n");
+    assert!(
+        spaced.contains("autojoin") && spaced.contains("#my chan") && spaced.contains("network n"),
+        "the message must name the network and the entry: {spaced}"
+    );
+    let injected =
+        err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nautojoin = [\"#ok\\r\\nQUIT\"]\n");
+    assert!(injected.contains("autojoin"), "{injected}");
+    let empty = err("nick = \"a\"\n[networks.n]\nhost = \"h\"\nautojoin = [\"\"]\n");
+    assert!(empty.contains("empty entry"), "{empty}");
+    // A perfectly ordinary list still parses, including names we do not police.
+    config::parse(
+        "nick = \"a\"\n[networks.n]\nhost = \"h\"\nautojoin = [\"#a\", \"&b\", \"weird\"]\n",
+        &base(),
+    )
+    .expect("names are the server's business, line integrity is ours");
+}
+
+/// The refusal list must hold in *any* version of the schema, so it walks arrays
+/// as well as tables — today's schema having no array-of-tables is a fact about
+/// today, not a property to rely on.
+#[test]
+fn the_credential_scan_descends_through_arrays() {
+    let message =
+        err("nick = \"a\"\n[networks.n]\nhost = \"h\"\n[[extras]]\npassword = \"hunter2\"\n");
+    assert!(
+        message.contains("password") && message.contains("keyring"),
+        "an array-of-tables must not smuggle one past the scan: {message}"
+    );
 }
 
 /// Opinionated defaults are the product (§2.1): TLS 6697, plaintext 6667.

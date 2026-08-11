@@ -138,12 +138,10 @@ pub async fn run(args: SessionArgs) -> Result<(), String> {
 /// error names the candidates, because "ambiguous" without the list is a second
 /// round trip through the user's own file.
 fn resolve_network(config: &config::Config, requested: Option<&str>) -> Result<String, String> {
+    // Non-empty by construction: `config::parse` refuses a file that names no
+    // networks, with a message about the missing table rather than about this flag.
     let candidates: Vec<&str> = config.networks.keys().map(String::as_str).collect();
-    let named = if candidates.is_empty() {
-        "no networks".to_owned()
-    } else {
-        format!("[{}]", candidates.join(", "))
-    };
+    let named = format!("[{}]", candidates.join(", "));
     match requested {
         Some(name) if config.networks.contains_key(name) => Ok(name.to_owned()),
         Some(name) => Err(format!(

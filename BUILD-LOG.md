@@ -2185,3 +2185,167 @@ persisted). One staleness observed and deliberately **not** fixed here, flagged 
 review instead: PLAN stage 2 item 1's 9a note still says announcements "go out on a
 spawned task", which prompt 9b made inline — staled by 9b, so it is 9b's correction to
 make, not this prompt's silent edit.
+
+## Prompt 10a — review addendum (answers the `**Review:** pending` line above)
+
+**Date:** 2026-08-10  **Affects:** the prompt 10a entry above; PR #16, second commit
+
+Appended rather than edited into that entry, for the reason 9a's and 9b's addenda
+recorded: the entry is committed and pushed, so revising it in place trips
+`log-append-only` on the staged diff.
+
+**Review verdict:** the order was executed faithfully and the fence is clean — no
+credential surface of any kind, `--sasl`/`SUPERNAUT_SASL_PASSWORD` intact,
+`PROTOCOL_VERSION` still 1 with no variant touched, no migration, no `--config` flag,
+no new dependency beyond `toml`/`serde`, no autoconnect. The findings were all in the
+validation surface rather than the architecture, which is where a first config schema's
+bugs live.
+
+**Shipped:** eight fixes.
+
+(1) **The highest finding, and it was a real bug this prompt introduced:
+`autojoin` entries were unvalidated for line integrity.** `autojoin = ["#my chan"]`
+becomes `JOIN #my chan`, which IRC parses as channel `#my` **with key `chan`** — a
+join of the wrong thing, succeeding, with no error from the client, the server, or the
+user's own eyes; and an entry containing CR/LF injects a second IRC command outright.
+The mistake has a name worth keeping: **the fence said "do not validate channel
+names", and I read that as "do not validate autojoin".** Those are different. A channel
+*name* is the server's business (CHANTYPES comes from ISUPPORT, so we would be
+guessing, which is exactly what the fence forbade); the *line* is ours, because
+`connection/mod.rs` joins the entries with `,` into one `JOIN` we write. The order's
+own `nick` rule states the principle verbatim — "whitespace breaks the NICK line
+itself, which is our bug, not the server's policy" — and it applies unchanged one field
+over. Fixed: each entry must be non-empty and free of whitespace and control
+characters, with the message naming the network and the entry; two tests, plus a
+positive case asserting `["#a", "&b", "weird"]` still parses, so the fix cannot drift
+into policing names.
+
+(2) **Whitespace-only network names and hosts passed**, because both checks were
+`is_empty()` rather than `trim().is_empty()` — while `nick`, one screen above, was
+checked properly. A `[networks." "]` table would have minted a `network` row named
+`" "`, which nothing could refer to again and which config could only rediscover by
+being edited to contain a quoted space. Both tightened, both tested.
+
+(3) **A zero-network config blamed the wrong thing.** `networks` is
+`#[serde(default)]`, so a `nick`-only file is schema-valid and the refusal came from
+`resolve_network` in the binary: *"--network is required unless the config file names
+exactly one network"* — a message about a flag, to someone whose file has no network in
+it. `parse` now refuses it directly (*"no networks; add a [networks.<name>] table with
+a `host` key"*), and `resolve_network`'s dead empty-candidates branch is gone with a
+comment saying `parse` guarantees non-empty. Tested.
+
+(4) **`refuse_credential_keys` did not descend into arrays.** Unreachable through
+today's schema — there is no array-of-tables key — but the entry above claims the
+schema "cannot acquire one by accident **in any version**", and a guard that is true
+only of the current version does not support that claim. Three lines and a
+`refuse_in_value` helper; tested with `[[extras]] password = "…"`.
+
+(5) Three doc pointers in config.rs said "PLAN stage 6" for the multi-network
+deferral, which landed under stage 5 item 1 — the entry above recorded the deviation
+and then left the comments spelling the wrong stage, which is the version of a stale
+doc that is hardest to notice.
+
+(6) `i64::try_from(index).expect("…")` in `into_networks` replaced by
+`.zip(1i64..)` — the panic is deleted rather than argued to be unreachable, and the
+`+ 1` off-by-one hazard goes with it.
+
+(7) `#[derive(Clone)]` removed from `Config` and `NetworkEntry`; nothing clones
+either, and speculative trait impls are the cheap kind of premature abstraction.
+
+(8) **live-run.sh's post-restart sync had no post-loop failure check** — a weakness
+the rewrite inherited rather than introduced, but the rewrite is what made it reachable
+(the `-ge 2` count replaced a `grep -q`). Without it a reconnect that never completes
+falls through into the search, backlog and marker assertions, which then fail for the
+wrong reason — an empty corpus — and hide the reconnect as the cause. Now a loud
+failure naming the segment, with the a.out and ergo log tails every other sync point
+prints.
+
+**Accepted as they stand, with the reasoning recorded rather than re-litigated:**
+
+- **`Config` is publicly constructible around its own validation.** The fields are
+  `pub`, `validate` is private, and `into_networks` is `pub` — so code that builds a
+  `Config` by hand and lowers it skips the loopback-only plaintext rule, the new
+  autojoin rule, and `tls_ca` resolution. Real, and deliberately not restructured
+  here: the only plausible second constructor is stage 2's first-run wizard, and the
+  choice between "the wizard round-trips through `parse`" and "validation moves into
+  `into_networks`" wants that wizard in front of it. Filed as a PLAN stage 2 item 7
+  note naming both options and exactly what is skipped.
+- **`default_config_path`'s `XDG_CONFIG_HOME` and `$HOME/.config` legs have no test.**
+  Only the `SUPERNAUT_CONFIG_DIR` leg is exercised, by every by-hand and live-run
+  session. Accepted and recorded rather than papered over: testing env-var precedence
+  means either mutating process env in a test (racy across a parallel test binary) or
+  extracting a pure helper taking three `Option<OsString>`s, which is a refactor
+  arriving for a test rather than for the code.
+- **The order's own trailing list contradicted its Acceptance paragraph** — the
+  process finding, and the one worth mechanizing. See Learned.
+
+**Learned:** two, both about the order rather than the code.
+
+(1) **A budget bullet's descope list must be disjoint from the Acceptance paragraph.**
+10a's budget listed session E and the orphan line as the first thing to trail if the
+size cap bound, while its Acceptance paragraph required session E to run and say
+`orphan network liverun` out loud. Both were followed, so nothing broke — but had the
+cap actually bound, the two instructions would have been in direct contradiction and
+whichever one got read second would have won silently. The rule: **if a step is in
+Acceptance, it cannot be on the trail list; if it is trailable, take it out of
+Acceptance.** Not mechanized as a check — it is a property of prose in a
+just-in-time-written prompt, which no grep can see — so it is recorded here for the
+next detail-writing sub-agent to be given.
+
+(2) **"Do not validate X" fences need to name the *reason*, not just the field.**
+Finding (1) landed because the fence said "channel names in `autojoin` are
+deliberately not validated" and the reason (CHANTYPES is ISUPPORT's, so we would be
+guessing) was in the same sentence — but I generalised from the field to the whole
+value. Had it read "do not guess at channel *name* syntax; line integrity is still
+ours", the bug is unwritable. The fence was right and the reading was lazy; the fix to
+that class is fences that state the boundary rather than the exclusion.
+
+**Measurements after the fixes:** 931 changed lines in `crates/` (was 833; still
+oversize, still justified above — the eight fixes added ~100 lines, most of them
+tests). config.rs 282 lines, tests/config.rs 317, session.rs 351. Ratchets unchanged:
+`todo-count 0`, `longest-file 363` against a 400 ceiling. `cargo test --workspace`: 72
+passing, 0 failing — 3 more than before, all in `tests/config.rs`, which now has 14.
+
+**Live run:** `scripts/live-run.sh` re-run twice after the fixes, because config.rs's
+validation and the script itself both changed: **42/42, exit 0** both times. Nothing in
+the run's shape moved — the seq arithmetic still lands the marker on seq 3 and the
+autojoin re-fire on row 4, the `network` table still holds exactly one row named
+`liverun`, and session E still reports `orphan network liverun: 3 buffers not announced
+(not in config)` with no `#supernaut` announcement. The new post-loop check did not
+fire, which is the correct outcome and not evidence it works; it was verified by
+reading, not by breaking the reconnect on purpose — recorded honestly rather than
+claimed.
+
+**Review:** the review's findings are all dispositioned above — eight fixes applied
+(one a real bug in shipped behaviour, four validation gaps, three hygiene), three items
+accepted with reasons, **none rejected**. Its highest finding was correct and its
+proposed remedy was sufficient, which is the opposite of 9b's experience and worth
+noting for the same reason.
+
+**Carry-forward raised:** seven notes, none rejected. **Four to prompt 10b** in
+STAGE-1-PROMPTS.md, all four about the keyring's blast radius rather than its
+mechanism: key entries by the config network *name* and never by `NetworkId` (which
+`into_networks` renumbers whenever a network is added alphabetically earlier — a
+keyring entry would be the first thing to persist a wire id, and would silently
+re-point one network's credentials at another's); resolve the secret for the *selected*
+network only, since the map deliberately holds every configured one; live-run's
+credential surface is two lines and `write_config` is fixed-shape, so deleting the env
+bridge means extending the helper; and the stage-1 acceptance run against Libera now
+needs a hand-written config in an isolated `SUPERNAUT_CONFIG_DIR`, which is an explicit
+step to budget rather than a one-liner. **One to PLAN stage 4 item 3**: the
+orphan-network report is engine stderr only, so under the daemon the attaching client
+sees nothing and the "made visible" half of the abandonment decision stops holding —
+it needs a frame representation (gated on the handshake, since v1 forbade the variant)
+or a documented log location. **Two to PLAN stage 2**: item 1, the plaintext warning
+fires once at session start for the selected network only, so autoconnect dialing
+several networks would connect a plaintext one with no warning at all; item 7, config
+validation is a property of `parse` rather than of the `Config` type.
+
+**Also fixed while in PLAN.md, and recorded rather than done silently:** stage 2 item
+1's prompt-9a note said announcements "go out on a spawned task", which prompt 9b made
+inline. The entry above flagged it and deferred it as 9b's staleness to correct; the
+review confirmed it now reads wrong, so it is corrected here at first touch — the
+ordering hazard the note is *about* survives 9b's change (the storage jobs behind the
+announcement and the response still complete in their own order), so the note keeps its
+warning and loses its wrong mechanism, with a parenthetical saying it was corrected.
+Fixing a doc at the moment you touch it beats filing a ticket against yourself.

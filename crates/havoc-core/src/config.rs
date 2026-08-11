@@ -41,7 +41,7 @@ use crate::connection::io::Security;
 use crate::core::NetworkSettings;
 
 /// Not a config key. Diagnostics-grade text, carried verbatim from the
-/// pre-config debug session; a per-network realname is stage 6's multi-network
+/// pre-config debug session; a per-network realname is stage 5's multi-network
 /// work, and it is unobservable in a one-network stage.
 const REALNAME: &str = "supernaut debug session";
 
@@ -53,12 +53,12 @@ const CREDENTIAL_KEYS: [&str; 4] = ["password", "pass", "sasl_password", "nickse
 
 /// The whole file. `deny_unknown_fields` is not optional: a silently-ignored
 /// typo'd key is the config bug class that costs an evening.
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Global and single. `username` and `realname` are derived from it in the
     /// lowering; a per-network nick override waits until a second network makes
-    /// it observable (PLAN stage 6).
+    /// it observable (PLAN stage 5 item 1).
     pub nick: String,
     /// Keyed by the **stable network name** — the same string `ensure_network`
     /// keys the `network` table on, which is what makes config identity and
@@ -76,8 +76,8 @@ pub struct Config {
 
 /// One network's seed data. No `id` (see [`Config::into_networks`]) and no
 /// `server_name` for an SNI/connect-host split — that is one field when a
-/// bouncer makes it real (PLAN stage 6).
-#[derive(Debug, Clone, serde::Deserialize)]
+/// bouncer makes it real (PLAN stage 5 item 1).
+#[derive(Debug, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NetworkEntry {
     pub host: String,
@@ -89,9 +89,14 @@ pub struct NetworkEntry {
     /// Existence is deliberately **not** checked: the TLS connector reports
     /// that, once, where the failure actually is.
     pub tls_ca: Option<PathBuf>,
-    /// Channel names are deliberately **not** validated: CHANTYPES comes from
+    /// Channel *names* are deliberately **not** validated — CHANTYPES comes from
     /// ISUPPORT, so we would be guessing, and the server's refusal is already
-    /// loud.
+    /// loud — but **line integrity is**, for the same reason `nick` is: an entry
+    /// is joined with `,` into one `JOIN` line, so whitespace or a control
+    /// character in it corrupts the line we write, which is our bug and not the
+    /// server's policy. `"#my chan"` would otherwise become `JOIN #my chan` —
+    /// channel `#my` with key `chan`, a silently wrong join nobody reports — and
+    /// a CR/LF would inject a second command outright.
     #[serde(default)]
     pub autojoin: Vec<String>,
     /// The loud opt-in (§2.3), and loopback-only — stricter than the north star
@@ -121,7 +126,10 @@ pub fn parse(text: &str, base_dir: &Path) -> Result<Config, String> {
 }
 
 /// Depth-first, so `[networks.libera] password = "..."` is caught as surely as a
-/// top-level one.
+/// top-level one — and **through arrays as well as tables**, because the claim this
+/// list makes is that the schema cannot acquire a credential key by accident *in
+/// any version*, and today's schema having no array-of-tables is a fact about
+/// today, not a property worth relying on.
 fn refuse_credential_keys(table: &toml::Table) -> Result<(), String> {
     for (key, value) in table {
         if CREDENTIAL_KEYS.contains(&key.as_str()) {
@@ -130,8 +138,18 @@ fn refuse_credential_keys(table: &toml::Table) -> Result<(), String> {
                  live in the OS keyring, never in plaintext in this file (NORTH-STAR §5.8)"
             ));
         }
-        if let Some(sub) = value.as_table() {
-            refuse_credential_keys(sub)?;
+        refuse_in_value(value)?;
+    }
+    Ok(())
+}
+
+fn refuse_in_value(value: &toml::Value) -> Result<(), String> {
+    if let Some(table) = value.as_table() {
+        return refuse_credential_keys(table);
+    }
+    if let Some(array) = value.as_array() {
+        for element in array {
+            refuse_in_value(element)?;
         }
     }
     Ok(())
@@ -151,12 +169,34 @@ impl Config {
                 self.nick
             ));
         }
+        if self.networks.is_empty() {
+            return Err(
+                "config: no networks; add a [networks.<name>] table with a `host` key".to_owned(),
+            );
+        }
         for (name, entry) in &mut self.networks {
-            if name.is_empty() {
+            // `trim()`, not `is_empty()`: a whitespace-only name would mint a
+            // `network` row called " " that nothing could ever refer to again.
+            if name.trim().is_empty() {
                 return Err("config: a network table has an empty name".to_owned());
             }
-            if entry.host.is_empty() {
+            if entry.host.trim().is_empty() {
                 return Err(format!("config: network {name}: `host` must not be empty"));
+            }
+            for channel in &entry.autojoin {
+                if channel.is_empty() {
+                    return Err(format!(
+                        "config: network {name}: `autojoin` has an empty entry"
+                    ));
+                }
+                if channel.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                    return Err(format!(
+                        "config: network {name}: `autojoin` entry {channel:?} must not \
+                         contain whitespace or control characters — it is joined into one \
+                         JOIN line, so a space makes it a channel key and a newline makes \
+                         it a second command"
+                    ));
+                }
             }
             if entry.plaintext {
                 if entry.tls_ca.is_some() {
@@ -201,9 +241,8 @@ impl Config {
         let nick = self.nick;
         self.networks
             .into_iter()
-            .enumerate()
-            .map(|(index, (name, entry))| {
-                let ordinal = i64::try_from(index).expect("a config file's network count fits i64");
+            .zip(1i64..)
+            .map(|((name, entry), ordinal)| {
                 let port = entry
                     .port
                     .unwrap_or(if entry.plaintext { 6667 } else { 6697 });
@@ -216,7 +255,7 @@ impl Config {
                     }
                 };
                 (
-                    NetworkId(ordinal + 1),
+                    NetworkId(ordinal),
                     NetworkSettings {
                         name,
                         host: entry.host,
