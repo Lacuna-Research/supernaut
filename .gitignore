@@ -2,7 +2,7 @@
 .claude-pm
 .claude/worktrees/
 
-# Local check-failure telemetry (see CLAUDE.md). Per-machine by design: CI never
+# Local check-failure telemetry (see AGENTS.md). Per-machine by design: CI never
 # writes it, and tracking it would make every clone's ledger fight the others'.
 discipline-stats.txt
 

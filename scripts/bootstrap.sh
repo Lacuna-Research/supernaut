@@ -3,7 +3,7 @@
 #
 # This exists because the two setup steps that make the discipline non-optional are
 # themselves unenforced: git hooks (local, per-clone) and branch protection
-# (server-side, per-repo). Until both are done, every rule in CLAUDE.md is voluntary.
+# (server-side, per-repo). Until both are done, every rule in AGENTS.md is voluntary.
 # The script does the mechanical half and prints the judgement half.
 set -euo pipefail
 
@@ -44,7 +44,7 @@ else
 	echo "north-star  none — add north-star.md, or write PLAN.md directly"
 fi
 
-remaining=$(grep -lE '<[A-Za-z][^>]*>' CLAUDE.md PLAN.md STAGE-1-PROMPTS.md 2>/dev/null |
+remaining=$(grep -lE '<[A-Za-z][^>]*>' AGENTS.md PLAN.md STAGE-1-PROMPTS.md 2>/dev/null |
 	tr '\n' ' ' || true)
 if [ -n "$remaining" ]; then
 	echo "todo        placeholders remain in: $remaining"

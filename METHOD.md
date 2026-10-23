@@ -16,14 +16,14 @@ finds them, or a way to make a machine check that they were written.
 
 | File | Kind | Lifetime | Rule |
 |---|---|---|---|
-| `CLAUDE.md` | Operative rules only | Permanent, hard-capped | Prune as readily as you add |
+| `AGENTS.md` | Operative rules only | Permanent, hard-capped | Prune as readily as you add |
 | `PLAN.md` | Living roadmap + the one list of open questions | Permanent, freely rewritten | Reorder, rescope, delete |
 | `STAGE-N-PROMPTS.md` | The work queue for the current stage | One stage | Detail written just-in-time |
 | `BUILD-LOG.md` | Reasoning, deviations, surprises, measurements | Permanent, append-only | Never edit a past entry |
 | `SUBAGENT-BRIEFS.md` | Static dispatch briefs for the four sub-agent roles | Permanent, static reference | No state lives here |
 | `ratchets.txt` | Ceilings for slow-rot metrics | Permanent | Only turns one way |
 
-The split matters more than the contents. `CLAUDE.md` holds *rules*; `BUILD-LOG.md`
+The split matters more than the contents. `AGENTS.md` holds *rules*; `BUILD-LOG.md`
 holds *reasoning*. That separation is what keeps the instruction file short enough to
 be read carefully, and it is the first thing that erodes if you let it.
 
@@ -41,7 +41,7 @@ failure mode that had already happened at least once.
 
 ### 1. The line cap on the instruction file
 
-`CLAUDE.md` is capped (100 lines) by `scripts/check-docs.sh`, and the cap is not to be
+`AGENTS.md` is capped (100 lines) by `scripts/check-docs.sh`, and the cap is not to be
 raised. Instruction files rot by accretion: rules get appended, never removed, until
 the file is long enough that nothing in it is read carefully. A hard cap converts
 "should we prune this?" from a judgement call into a build failure. In practice the cap
@@ -149,7 +149,7 @@ landed) and exits silently otherwise.
 
 ## The prompt lifecycle
 
-Written into `CLAUDE.md` as a numbered list, because a cold session will do exactly what
+Written into `AGENTS.md` as a numbered list, because a cold session will do exactly what
 is listed and nothing that is merely implied.
 
 **Starting a prompt:** re-read it in the queue, including any carry-forward block. If it
@@ -238,7 +238,7 @@ throughout: a promise became a check, and every check ships with fixtures.
   buried in one handoff entry; the register computes it instead.
 - **The forced stage boundary** (check 10). When a status line reads N/N, nothing else
   lands until `## Retrospective — Stage N` exists in the log. The retrospective template
-  bundles the four audits momentum skips: the CLAUDE.md prune, the docs audit, the
+  bundles the four audits momentum skips: the AGENTS.md prune, the docs audit, the
   register review, and the cold-start drill.
 - **One-way ratchets** (check 14). `ratchets.txt` records ceilings;
   `measure-ratchets.sh` emits current values. Worse fails; better invites tightening
@@ -281,7 +281,7 @@ pattern this whole document warns about.
 
 ### The sub-agent roles
 
-Four roles, briefs in `SUBAGENT-BRIEFS.md`, wired into the lifecycle in `CLAUDE.md`.
+Four roles, briefs in `SUBAGENT-BRIEFS.md`, wired into the lifecycle in `AGENTS.md`.
 The organizing insight: a sub-agent's value here is **context isolation, not
 parallelism** — each role works precisely because the agent lacks the implementing
 session's context, so the fastest way to ruin one is to paste the conversation in
@@ -314,7 +314,7 @@ edited, or rejected-because — since a rejected proposal is information too.
 
 ## Adaptation checklist
 
-1. Copy everything: `CLAUDE.md`, `PLAN.md`, `BUILD-LOG.md`, `STAGE-1-PROMPTS.md`,
+1. Copy everything: `AGENTS.md`, `PLAN.md`, `BUILD-LOG.md`, `STAGE-1-PROMPTS.md`,
    `SUBAGENT-BRIEFS.md`, `ratchets.txt`, `scripts/`, `.githooks/`, `.claude/`,
    `.github/workflows/`, `Makefile`.
 2. Replace every `<PLACEHOLDER>` — search for `<` to find them all.

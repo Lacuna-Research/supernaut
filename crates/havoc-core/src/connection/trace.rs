@@ -13,7 +13,7 @@ use super::SaslMechanism;
 /// `--trace-irc` writes every line we send to stderr, and scripts/live-run.sh
 /// keeps a copy of that capture on disk — so without this the base64
 /// `AUTHENTICATE <payload>` line *is* the password in a log file, which is the
-/// one thing CLAUDE.md forbids outright. Base64 is not redaction.
+/// one thing AGENTS.md forbids outright. Base64 is not redaction.
 ///
 /// Applied **at the trace only**, never at `send_line`: the wire must still carry
 /// the real payload, and tests/state_machine.rs asserts that it does.

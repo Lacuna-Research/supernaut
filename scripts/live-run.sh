@@ -533,7 +533,7 @@ assert "$WORK/b.out" 'event connection-state network=1 phase=registered' 'B regi
 assert "$WORK/a.trace" '903 .*uthentication successful' 'A authenticated via SASL (903)'
 assert "$WORK/a.trace" '>> AUTHENTICATE PLAIN' 'A offered SASL PLAIN'
 assert "$WORK/a.trace" '>> AUTHENTICATE <redacted>' 'the SASL payload was redacted in the trace'
-# CLAUDE.md's never-in-logs rule, made mechanical. The trace outlives $WORK (it
+# AGENTS.md's never-in-logs rule, made mechanical. The trace outlives $WORK (it
 # is copied to .cache/last-a.trace for the corpus harvest), so a base64 payload
 # in it would be a password persisted on disk — base64 is not redaction.
 # `\0alice\0…`, not `alice\0alice\0…`: SASL PLAIN is authzid NUL authcid NUL

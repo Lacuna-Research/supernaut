@@ -6,7 +6,7 @@ each role works precisely because the agent does *not* have the implementing ses
 context, and the fastest way to ruin one is to paste the conversation in alongside the
 brief. Give each agent exactly the inputs its brief names, and nothing else.
 
-Two standing rules, from `CLAUDE.md`:
+Two standing rules, from `AGENTS.md`:
 
 - **Sub-agents advise; artifacts decide.** Output lands as a proposal in an existing
   artifact — a carry-forward note, a log-entry section, a Still open item. Never a new
@@ -64,7 +64,7 @@ requirement, not the ritual.
 ## 2. Just-in-time detail writer *(starting a prompt whose detail is unwritten)*
 
 **Inputs:** the `PLAN.md` item(s) verbatim, the prompt's scope/grouping/fence stub and
-its carry-forward notes, `CLAUDE.md`, and the current source files the notes name.
+its carry-forward notes, `AGENTS.md`, and the current source files the notes name.
 **Not** the previous prompt's session — the brief must not inherit the last prompt's
 shape.
 

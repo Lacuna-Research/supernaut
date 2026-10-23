@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Mechanical enforcement of the documentation discipline described in CLAUDE.md.
+# Mechanical enforcement of the documentation discipline described in AGENTS.md.
 #
 # Every rule here was previously a promise. A promise that a machine does not check
 # is a promise that eventually is not kept.
@@ -17,7 +17,7 @@ set -euo pipefail
 # Configuration. Everything project-specific lives here or in the final section.
 # ---------------------------------------------------------------------------
 
-CLAUDE_MAX_LINES=100
+AGENTS_MAX_LINES=100
 
 # Directory whose changes require a BUILD-LOG.md entry.
 SOURCE_DIR="crates"
@@ -104,18 +104,18 @@ added_lines() { diff_file "$1" | sed -n '/^+++/!s/^+//p'; }
 printf 'Documentation discipline (%s)\n' "$scope"
 
 # ---------------------------------------------------------------------------
-# 1. CLAUDE.md must stay short.
+# 1. AGENTS.md must stay short.
 #
 # Instruction files rot by accretion: rules get appended, never removed, until the
 # file is long enough that nothing in it is read carefully. A hard cap forces the
 # pruning that good intentions do not.
 # ---------------------------------------------------------------------------
-rule='claude-cap'
-lines=$(wc -l <CLAUDE.md | tr -d ' ')
-if [ "$lines" -gt "$CLAUDE_MAX_LINES" ]; then
-	err "CLAUDE.md is $lines lines (cap $CLAUDE_MAX_LINES). Prune it. Do not raise the cap."
+rule='agents-cap'
+lines=$(wc -l <AGENTS.md | tr -d ' ')
+if [ "$lines" -gt "$AGENTS_MAX_LINES" ]; then
+	err "AGENTS.md is $lines lines (cap $AGENTS_MAX_LINES). Prune it. Do not raise the cap."
 else
-	ok "CLAUDE.md $lines/$CLAUDE_MAX_LINES lines"
+	ok "AGENTS.md $lines/$AGENTS_MAX_LINES lines"
 fi
 
 # ---------------------------------------------------------------------------
@@ -305,7 +305,7 @@ for entry in "${STAGES[@]}"; do
 
 	# 10. A finished stage requires a retrospective before anything else lands.
 	#
-	# The stage boundary is where CLAUDE.md gets pruned, the docs get audited, the
+	# The stage boundary is where AGENTS.md gets pruned, the docs get audited, the
 	# cold-start drill runs, and the next stage gets planned — and it is exactly the
 	# moment momentum says to skip all four and just start. Failing every commit until
 	# the retrospective exists is the cheapest way to make the pause non-optional.
@@ -372,7 +372,7 @@ fi
 #
 # Correction entries carry a `**Category:**` tag. One occurrence is an accident, two
 # a coincidence; at CATEGORY_LIMIT the pattern is a habit, and a habit gets a rule in
-# CLAUDE.md or a check in this script — recorded as a `**Rule raised:**` line on one
+# AGENTS.md or a check in this script — recorded as a `**Rule raised:**` line on one
 # of that category's entries. This is the register that surfaced 'asserting instead
 # of testing' in the source project, buried in one handoff entry until then.
 # ---------------------------------------------------------------------------
