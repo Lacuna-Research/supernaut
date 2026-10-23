@@ -19,7 +19,7 @@ havoc-core = { path = "crates/havoc-core" }
 havoc-transport = { path = "crates/havoc-transport" }
 supernaut-tui = { path = "crates/supernaut-tui" }
 
-# Zero-warning builds are a rule (CLAUDE.md); the lint config travels with the
+# Zero-warning builds are a rule (AGENTS.md); the lint config travels with the
 # repo so the rule survives any shell. Every crate opts in via [lints] workspace.
 [workspace.lints.rust]
 warnings = "deny"

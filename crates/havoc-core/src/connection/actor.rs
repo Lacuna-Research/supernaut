@@ -36,7 +36,7 @@ pub enum ActorCommand {
 
 /// A command named for a log line: variant and target, **never** the body. The
 /// only caller is the loud drop while disconnected, and a PRIVMSG's text can be a
-/// password (CLAUDE.md's secrets rule applies to logs as much as to config).
+/// password (AGENTS.md's secrets rule applies to logs as much as to config).
 fn describe(command: &ActorCommand) -> String {
     match command {
         ActorCommand::Join(channel) => format!("Join {channel}"),

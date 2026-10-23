@@ -96,7 +96,7 @@ pub(crate) fn set(network_argument: &str) -> Result<(), String> {
     entry(&network)?
         .set_password(secret)
         .map_err(|error| describe(&network, &error))?;
-    // Names the entry, never the secret (CLAUDE.md).
+    // Names the entry, never the secret (AGENTS.md).
     println!(
         "stored a password in the OS keyring: service {SERVICE}, account {network} \
          (SASL account {account})"

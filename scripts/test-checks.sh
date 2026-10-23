@@ -43,7 +43,7 @@ build_repo() {
 	sed -i.bak 's|"1:STAGE-1-PROMPTS.md:12"|"1:STAGE-1-PROMPTS.md:3"|' scripts/check-docs.sh
 	rm scripts/check-docs.sh.bak
 
-	seq 1 50 | sed 's/^/rule /' >CLAUDE.md
+	seq 1 50 | sed 's/^/rule /' >AGENTS.md
 
 	cat >STAGE-1-PROMPTS.md <<'EOF'
 # Stage 1 — The Prompts
@@ -164,11 +164,11 @@ EOF
 stage_all
 expect pass "baseline repo is green"
 
-# --- 1. CLAUDE.md line cap ------------------------------------------------
+# --- 1. AGENTS.md line cap ------------------------------------------------
 build_repo
-seq 1 120 | sed 's/^/rule /' >>CLAUDE.md
+seq 1 120 | sed 's/^/rule /' >>AGENTS.md
 stage_all
-expect fail "CLAUDE.md over cap fails" "cap 100"
+expect fail "AGENTS.md over cap fails" "cap 100"
 
 # --- 2. Append-only log ---------------------------------------------------
 build_repo
@@ -275,7 +275,7 @@ cat >>BUILD-LOG.md <<'EOF'
 
 ## Retrospective — Stage 1
 
-CLAUDE.md pruned to 50 lines; docs audited; cold-start drill run, no gaps.
+AGENTS.md pruned to 50 lines; docs audited; cold-start drill run, no gaps.
 EOF
 stage_all
 expect pass "finished stage with retrospective passes"
@@ -341,7 +341,7 @@ cat >>BUILD-LOG.md <<'EOF'
 ## Correction — four
 **Category:** asserted-not-tested
 **Not mechanizable because:** judgement.
-**Rule raised:** CLAUDE.md now says: test the limit before designing around it.
+**Rule raised:** AGENTS.md now says: test the limit before designing around it.
 EOF
 stage_all
 expect pass "category with a raised rule passes"
@@ -369,10 +369,10 @@ expect fail "worsened ratchet fails" "worsened"
 
 # --- 15. Failure ledger (passive telemetry) --------------------------------
 build_repo
-seq 1 120 | sed 's/^/rule /' >>CLAUDE.md
+seq 1 120 | sed 's/^/rule /' >>AGENTS.md
 stage_all
 ./scripts/check-docs.sh >/dev/null 2>&1
-if grep -qE "claude-cap" discipline-stats.txt 2>/dev/null; then
+if grep -qE "agents-cap" discipline-stats.txt 2>/dev/null; then
 	pass=$((pass + 1)); printf '  ok    %s\n' "local failure lands in the ledger with its rule id"
 else
 	failures=$((failures + 1)); printf '  FAIL  %s\n' "local failure lands in the ledger with its rule id"

@@ -3213,3 +3213,34 @@ all. The first is on Still open with the user as owner. The second is on stage 2
 stage 3 as its deadline, and it is the more dangerous of the two, because it is not a gap in
 what was verified — it is a gap in what was *built*, discovered only because the acceptance
 run went somewhere the plan had not.
+
+## Decision — the instruction file is `AGENTS.md`, and no `CLAUDE.md` exists beside it
+**Date:** 2026-10-23  **Affects:** AGENTS.md (was CLAUDE.md), METHOD.md, SUBAGENT-BRIEFS.md, STAGE-1-PROMPTS.md (header only), .gitignore, Cargo.toml, scripts/check-docs.sh, scripts/test-checks.sh, scripts/bootstrap.sh, scripts/check-worktree.sh, scripts/live-run.sh, three comments under crates/
+
+**Chose:** `git mv CLAUDE.md AGENTS.md`, contents unchanged, and every live reference
+repointed: check 1's line cap now reads `AGENTS.md` (`AGENTS_MAX_LINES`, still 100, not
+raised), its ledger rule id is `agents-cap` (was `claude-cap`), and the fixtures in
+`test-checks.sh` build an `AGENTS.md`.
+**Over:** keeping `CLAUDE.md`; a `CLAUDE.md` stub that imports `AGENTS.md`; a symlink
+either way round.
+**Because:** the work now runs under more than one coding-agent harness (Claude Code,
+pi), and `AGENTS.md` is the name they share. Claude Code 2.1.277+ reads a project
+`AGENTS.md` natively but ignores it when any `CLAUDE.md` exists in the same or a parent
+directory — so a stub or symlink is not a harmless bridge, it is the thing that
+switches the real file off. The rule id is renamed rather than kept for continuity
+because there is no continuity to keep: the Stage 1 retrospective records that no
+ledger survived the stage.
+**Revisit if:** a harness the project actually uses cannot read `AGENTS.md`.
+
+Past entries in this log — including the templates above, which say "CLAUDE.md" in the
+Correction and Retrospective sections — stay as written, since the log is append-only.
+**Read every "CLAUDE.md" above this entry as `AGENTS.md`.** That includes the Stage 1
+retrospective's instruction to repoint "CLAUDE.md's line 4 pointer" when stage 2 opens.
+The completed prompt bodies in `STAGE-1-PROMPTS.md` are left as written for the same
+reason; only its standing header was repointed.
+
+**Shipped:** the rename and the reference sweep above; the three `crates/` changes are
+comments naming the secrets/zero-warning rules' home, no code.
+**Learned:** a `CLAUDE.md` anywhere up the tree silently disables `AGENTS.md` for Claude
+Code, so never add one back, not even as a pointer.
+**Live run:** N/A (no observable behaviour changes; comment-only in `crates/`).

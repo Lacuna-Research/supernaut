@@ -14,7 +14,7 @@ together when they touch the same code, and apart when they merely sound related
 Each block is self-contained and assumes the previous ones are done and merged. Every
 prompt has a **Do not** section: the scope fence that keeps later work from leaking
 backward. Standing rules — Rust stable, cargo workspace under `crates/`, zero-warning
-builds, clippy strict, rustfmt, the dependency allowlist — live in `CLAUDE.md` and load
+builds, clippy strict, rustfmt, the dependency allowlist — live in `AGENTS.md` and load
 automatically.
 
 Each prompt is one branch (`prompt-NN-slug`), one PR, squash-merged once CI is green.

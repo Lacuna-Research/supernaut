@@ -76,5 +76,5 @@ fi
 [ -n "$reason" ] || exit 0
 
 cat <<EOF
-{"decision":"block","reason":"Stale worktree: you are still in \`$PWD\` on branch \`$branch\`, and $reason. Per CLAUDE.md, a prompt ends at the repo root. Verify nothing unique remains (\`git status\`, \`git stash list\`, and that the branch adds no lines the base lacks), then leave the worktree and remove it. If you are deliberately continuing to work here, say so and carry on."}
+{"decision":"block","reason":"Stale worktree: you are still in \`$PWD\` on branch \`$branch\`, and $reason. Per AGENTS.md, a prompt ends at the repo root. Verify nothing unique remains (\`git status\`, \`git stash list\`, and that the branch adds no lines the base lacks), then leave the worktree and remove it. If you are deliberately continuing to work here, say so and carry on."}
 EOF
